@@ -95,6 +95,8 @@ GitKit is protocol-oriented, making it easy to mock for testing or provide alter
 
 ## Implementing a Custom Transport
 
+> **Note:** GitKit does not ship with a built-in network transport. Your application **must** provide its own implementation of the `GKTransport` protocol to use any remote operations (fetch, push, pull, clone). This keeps GitKit free of platform-specific networking dependencies and gives you full control over authentication, caching, and request handling.
+
 To enable fetch/push/pull/clone, implement the `GKTransport` protocol:
 
 ```swift
