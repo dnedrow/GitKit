@@ -6,20 +6,72 @@ extension GKRepository {
 
     // MARK: - Add (Stage)
 
-    /// Stages a file for the next commit.
-    /// - Parameter path: Relative path to the file in the working directory.
+    /// Stages a file (or directory) for the next commit.
+    ///
+    /// Ignored paths that are not already tracked are skipped, matching Git's behavior.
+    /// A path that is already tracked in the index is staged even if it matches an
+    /// ignore pattern. When `path` refers to a directory, every non-ignored file beneath
+    /// it is staged.
+    /// - Parameter path: Relative path to the file or directory in the working directory.
     public func GKAdd(path: String) throws {
+        let fm = FileManager.default
         let fileURL = workDir.appendingPathComponent(path)
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: fileURL.path, isDirectory: &isDir) else {
             throw GKError.ioError("File not found: \(path)")
+        }
+
+        if isDir.boolValue {
+            try addDirectory(at: fileURL)
+            return
+        }
+
+        var index = try readIndex()
+        let isTracked = index.entries.contains { $0.path == path }
+
+        // Skip ignored, untracked paths (already-tracked paths are still stageable).
+        if !isTracked && isIgnored(path) {
+            return
         }
 
         let data = try Data(contentsOf: fileURL)
         let raw = GKRawObject(type: .blob, data: data)
         try objectDB.write(raw)
 
-        var index = try readIndex()
         try index.add(path: path, oid: raw.oid, mode: .regular)
+        try writeIndex(index)
+    }
+
+    /// Stages all non-ignored files beneath a directory.
+    private func addDirectory(at directoryURL: URL) throws {
+        let fm = FileManager.default
+        var index = try readIndex()
+        let tracked = Set(index.entries.map(\.path))
+        let ignore = ignoreMatcher()
+
+        guard let enumerator = fm.enumerator(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        while let child = enumerator.nextObject() as? URL {
+            var childIsDir: ObjCBool = false
+            fm.fileExists(atPath: child.path, isDirectory: &childIsDir)
+            if childIsDir.boolValue { continue }
+
+            let relativePath = workTreeRelativePath(child) ?? child.lastPathComponent
+            if relativePath.hasPrefix(".git") { continue }
+            if !tracked.contains(relativePath) && ignore.isIgnored(path: relativePath) { continue }
+
+            let data = try Data(contentsOf: child)
+            let raw = GKRawObject(type: .blob, data: data)
+            try objectDB.write(raw)
+            try index.add(path: relativePath, oid: raw.oid, mode: .regular)
+        }
+
         try writeIndex(index)
     }
 

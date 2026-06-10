@@ -106,6 +106,35 @@ public struct GKConfiguration: GKConfigurationProtocol {
         remotes().first(where: { $0.name == name })
     }
 
+    // MARK: - Ignore Configuration
+
+    /// Resolves the global excludes file referenced by `core.excludesFile`.
+    ///
+    /// Expands a leading `~` to the user's home directory. Returns `nil` when the key
+    /// is unset or when the resolved file does not exist, so callers can treat a missing
+    /// global ignore file as "no global patterns" without handling errors.
+    public func coreExcludesFile() -> URL? {
+        guard let raw = getString("core.excludesFile")?.trimmingCharacters(in: .whitespaces),
+              !raw.isEmpty else {
+            return nil
+        }
+
+        let expanded: String
+        if raw == "~" {
+            expanded = FileManager.default.homeDirectoryForCurrentUser.path
+        } else if raw.hasPrefix("~/") {
+            expanded = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(String(raw.dropFirst(2))).path
+        } else {
+            expanded = (raw as NSString).expandingTildeInPath
+        }
+
+        guard FileManager.default.fileExists(atPath: expanded) else {
+            return nil
+        }
+        return URL(fileURLWithPath: expanded)
+    }
+
     // MARK: - Branch Configuration
 
     /// Gets the upstream (tracking) information for a branch.

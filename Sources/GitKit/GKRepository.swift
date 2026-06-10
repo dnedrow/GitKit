@@ -209,6 +209,82 @@ public final class GKRepository: GKRepositoryProtocol {
         try refStorage.list(matching: nil)
     }
 
+    // MARK: - Ignore
+
+    /// Determines whether a working-tree path should be ignored.    ///
+    /// Aggregates ignore rules from all of Git's standard sources, in precedence order
+    /// (later overrides earlier):
+    /// 1. The global excludes file referenced by `core.excludesFile`.
+    /// 2. The repository's `.git/info/exclude`.
+    /// 3. Per-directory `.gitignore` files, shallow to deep.
+    ///
+    /// Missing or unreadable sources are treated as empty and never cause an error.
+    /// - Parameter relativePath: A path relative to the working directory.
+    /// - Returns: `true` if the path matches an active ignore rule.
+    public func isIgnored(_ relativePath: String) -> Bool {
+        ignoreMatcher().isIgnored(path: relativePath)
+    }
+
+    /// Builds the aggregated ignore matcher from all standard sources.
+    func ignoreMatcher() -> GKIgnore {        var sources = [URL]()
+
+        // 1. Global excludes file (core.excludesFile)
+        if let global = configuration.coreExcludesFile() {
+            sources.append(global)
+        }
+
+        // 2. Repository-level .git/info/exclude
+        sources.append(gitDir.appendingPathComponent("info/exclude"))
+
+        // 3. Per-directory .gitignore files (root first, then nested shallow to deep)
+        sources.append(contentsOf: gitignoreFiles())
+
+        return GKIgnore(mergingFiles: sources)
+    }
+
+    /// Discovers `.gitignore` files under the working directory, ordered shallow to deep.
+    private func gitignoreFiles() -> [URL] {
+        guard !isBare else { return [] }
+        let fm = FileManager.default
+        var results = [URL]()
+
+        // Root .gitignore first.
+        let root = workDir.appendingPathComponent(".gitignore")
+        if fm.fileExists(atPath: root.path) {
+            results.append(root)
+        }
+
+        // Nested .gitignore files, excluding the .git directory.
+        if let enumerator = fm.enumerator(at: workDir, includingPropertiesForKeys: nil) {
+            var nested = [(depth: Int, url: URL)]()
+            while let fileURL = enumerator.nextObject() as? URL {
+                let relativePath = workTreeRelativePath(fileURL) ?? fileURL.lastPathComponent
+                if relativePath.hasPrefix(".git/") || relativePath == ".git" { continue }
+                guard fileURL.lastPathComponent == ".gitignore" else { continue }
+                if fileURL.path == root.path { continue }
+                let depth = relativePath.split(separator: "/").count
+                nested.append((depth, fileURL))
+            }
+            // Shallow to deep so deeper files take precedence (last-match-wins).
+            nested.sort { $0.depth < $1.depth }
+            results.append(contentsOf: nested.map(\.url))
+        }
+
+        return results
+    }
+
+    /// Computes a path relative to the working directory, resolving symlinks so that
+    /// enumerated file URLs (which may carry a `/private` prefix on macOS) match the
+    /// working-directory root. Returns `nil` if the URL is not under the working tree.
+    func workTreeRelativePath(_ url: URL) -> String? {
+        let base = workDir.resolvingSymlinksInPath().path
+        let full = url.resolvingSymlinksInPath().path
+        if full == base { return "" }
+        let basePrefix = base.hasSuffix("/") ? base : base + "/"
+        guard full.hasPrefix(basePrefix) else { return nil }
+        return String(full.dropFirst(basePrefix.count))
+    }
+
     // MARK: - Status
 
     public func status() throws -> GKStatus {
@@ -240,10 +316,11 @@ public final class GKRepository: GKRepositoryProtocol {
         // Compare workdir vs index (simplified - checks for untracked)
         if !isBare {
             let fm = FileManager.default
+            let ignore = ignoreMatcher()
             if let enumerator = fm.enumerator(at: workDir, includingPropertiesForKeys: [.isRegularFileKey],
                                                options: [.skipsHiddenFiles]) {
                 while let fileURL = enumerator.nextObject() as? URL {
-                    let relativePath = fileURL.path.replacingOccurrences(of: workDir.path + "/", with: "")
+                    let relativePath = workTreeRelativePath(fileURL) ?? fileURL.lastPathComponent
                     if relativePath.hasPrefix(".git") { continue }
 
                     var isDir: ObjCBool = false
@@ -251,6 +328,8 @@ public final class GKRepository: GKRepositoryProtocol {
                     if isDir.boolValue { continue }
 
                     if !indexPaths.contains(relativePath) {
+                        // Exclude ignored, untracked files from the untracked set.
+                        if ignore.isIgnored(path: relativePath) { continue }
                         untracked.append(relativePath)
                     } else {
                         // Check if modified

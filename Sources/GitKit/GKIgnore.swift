@@ -30,6 +30,23 @@ public struct GKIgnore: GKIgnoreProtocol {
             .map { GKIgnorePattern(pattern: $0) }
     }
 
+    /// Builds an ignore matcher by merging patterns from multiple source files.
+    ///
+    /// Sources are read in the given order and their patterns concatenated, so later
+    /// sources take precedence (last-match-wins, including negation). This is used to
+    /// combine the global `core.excludesFile`, `.git/info/exclude`, and per-directory
+    /// `.gitignore` files (shallow to deep).
+    ///
+    /// Missing or unreadable files contribute zero patterns and never throw.
+    public init(mergingFiles urls: [URL]) {
+        var merged = [GKIgnorePattern]()
+        for url in urls {
+            guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            merged.append(contentsOf: GKIgnore.parse(content))
+        }
+        self.patterns = merged
+    }
+
     public func isIgnored(path: String) -> Bool {
         var ignored = false
         for pattern in patterns {

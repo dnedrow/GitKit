@@ -210,6 +210,150 @@ struct GKIgnoreTests {
     }
 }
 
+// MARK: - Gitignore Exclusion Tests
+
+@Suite("GKGitignoreExclusion")
+struct GKGitignoreExclusionTests {
+    /// Creates a fresh repository in a unique temporary directory.
+    private func makeRepo() throws -> (GKRepository, URL) {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitkit-ignore-test-\(UUID().uuidString)")
+        let repo = try GKRepository.GKInitRepository(at: tempDir)
+        return (repo, tempDir)
+    }
+
+    private func write(_ contents: String, to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    @Test func localGitignoreIsHonored() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try write("*.log\n", to: dir.appendingPathComponent(".gitignore"))
+        try write("noise", to: dir.appendingPathComponent("debug.log"))
+
+        #expect(repo.isIgnored("debug.log"))
+        #expect(!repo.isIgnored("main.swift"))
+    }
+
+    @Test func nestedGitignoreNegationOverridesParent() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try write("*.log\n", to: dir.appendingPathComponent(".gitignore"))
+        try write("!keep.log\n", to: dir.appendingPathComponent("subdir/.gitignore"))
+        try write("x", to: dir.appendingPathComponent("subdir/keep.log"))
+        try write("x", to: dir.appendingPathComponent("subdir/other.log"))
+
+        #expect(!repo.isIgnored("subdir/keep.log"))
+        #expect(repo.isIgnored("subdir/other.log"))
+    }
+
+    @Test func infoExcludeIsHonored() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try write("secret.txt\n", to: dir.appendingPathComponent(".git/info/exclude"))
+
+        #expect(repo.isIgnored("secret.txt"))
+        #expect(!repo.isIgnored("public.txt"))
+    }
+
+    @Test func globalExcludesFileIsHonored() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let globalIgnore = dir.appendingPathComponent("global_ignore")
+        try write("*.tmp\n", to: globalIgnore)
+        try repo.configuration.set("core.excludesFile", value: globalIgnore.path)
+
+        #expect(repo.isIgnored("scratch.tmp"))
+        #expect(!repo.isIgnored("scratch.txt"))
+    }
+
+    @Test func missingSourcesDoNotThrowAndIgnoreNothing() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        #expect(!repo.isIgnored("anything.txt"))
+        #expect(!repo.isIgnored("nested/file.bin"))
+    }
+
+    @Test func addSkipsIgnoredUntrackedFile() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try write("*.log\n", to: dir.appendingPathComponent(".gitignore"))
+        try write("noise", to: dir.appendingPathComponent("debug.log"))
+
+        try repo.GKAdd(path: "debug.log")
+
+        let index = try repo.readIndex()
+        #expect(!index.entries.contains { $0.path == "debug.log" })
+    }
+
+    @Test func addDirectoryStagesOnlyNonIgnoredEntries() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try write("*.log\n", to: dir.appendingPathComponent(".gitignore"))
+        try write("a", to: dir.appendingPathComponent("src/keep.swift"))
+        try write("b", to: dir.appendingPathComponent("src/skip.log"))
+
+        try repo.GKAdd(path: "src")
+
+        let index = try repo.readIndex()
+        #expect(index.entries.contains { $0.path == "src/keep.swift" })
+        #expect(!index.entries.contains { $0.path == "src/skip.log" })
+    }
+
+    @Test func alreadyTrackedIgnoredFileCanStillBeAdded() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Track the file first, before any ignore rule exists.
+        let fileURL = dir.appendingPathComponent("tracked.log")
+        try write("v1", to: fileURL)
+        try repo.GKAdd(path: "tracked.log")
+
+        // Now ignore *.log and modify the tracked file.
+        try write("*.log\n", to: dir.appendingPathComponent(".gitignore"))
+        try write("v2", to: fileURL)
+        try repo.GKAdd(path: "tracked.log")
+
+        let index = try repo.readIndex()
+        let entry = index.entries.first { $0.path == "tracked.log" }
+        #expect(entry != nil)
+        let blob = try repo.lookupBlob(oid: entry!.oid)
+        #expect(blob.text == "v2")
+    }
+
+    @Test func statusOmitsIgnoredUntrackedButReportsTrackedModifications() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Track and commit a file.
+        let tracked = dir.appendingPathComponent("tracked.txt")
+        try write("v1", to: tracked)
+        try repo.GKAdd(path: "tracked.txt")
+        let author = GKSignature(name: "Test", email: "test@test.com")
+        try repo.GKCreateCommit(message: "Initial", author: author)
+
+        // Add an ignore rule and an ignored untracked file, then modify the tracked file.
+        try write("*.log\n", to: dir.appendingPathComponent(".gitignore"))
+        try write("noise", to: dir.appendingPathComponent("debug.log"))
+        try write("v2", to: tracked)
+
+        let status = try repo.status()
+        #expect(!status.untracked.contains("debug.log"))
+        #expect(status.unstaged.contains { $0.path == "tracked.txt" })
+    }
+}
+
+
 // MARK: - Diff Tests
 
 @Suite("GKDiffEngine")
