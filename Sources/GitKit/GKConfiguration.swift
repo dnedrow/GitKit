@@ -139,7 +139,7 @@ public struct GKConfiguration: GKConfigurationProtocol {
         var lines = [String]()
         for section in sections {
             if let sub = section.subsection {
-                lines.append("[\\(section.name) \"\(sub)\"]")
+                lines.append("[\(section.name) \"\(sub)\"]")
             } else {
                 lines.append("[\(section.name)]")
             }
