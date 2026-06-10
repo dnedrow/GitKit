@@ -6,6 +6,14 @@ A **pure Swift** implementation of Git, inspired by [libgit2](https://libgit2.or
 [![Platforms](https://img.shields.io/badge/Platforms-macOS%2013+%20|%20iOS%2016+%20|%20tvOS%2016+%20|%20watchOS%209+-blue.svg)](https://developer.apple.com)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
+> [!WARNING]
+> **Work in progress — not production ready.** GitKit is under active development and is
+> **experimental**. APIs may change without notice, and the implementation has not been
+> hardened against real-world edge cases. **No guarantees are made** regarding correctness,
+> stability, or data integrity — using GitKit against a repository you care about may lead
+> to **data loss or corruption**. Always operate on backups or throwaway copies, and do not
+> rely on it for critical or irreplaceable data. Use at your own risk.
+
 ## Features
 
 - **Pure Swift** — SHA-1 and zlib implemented without CommonCrypto or system libraries
