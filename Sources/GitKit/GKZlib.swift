@@ -18,10 +18,9 @@ enum GKZlib {
         let cmf = data[data.startIndex]
         let flg = data[data.startIndex + 1]
 
-        // Check zlib magic: CMF=0x78 (deflate, window size 32K)
-        guard cmf == 0x78 || cmf == 0x08 || cmf == 0x18 || cmf == 0x28 ||
-              cmf == 0x38 || cmf == 0x48 || cmf == 0x58 || cmf == 0x68 else {
-            throw GKError.zlibError("Invalid zlib header CMF: \(cmf)")
+        // CMF low nibble must be 8 (deflate method)
+        guard (cmf & 0x0F) == 8 else {
+            throw GKError.zlibError("Invalid zlib compression method: \(cmf & 0x0F)")
         }
 
         guard (UInt16(cmf) * 256 + UInt16(flg)) % 31 == 0 else {
@@ -30,7 +29,16 @@ enum GKZlib {
 
         // Skip 2-byte zlib header, inflate the deflate stream
         let deflateData = data.dropFirst(2)
-        return try inflate(Data(deflateData))
+        return try inflate(Array(deflateData))
+    }
+
+    /// Decompresses a raw deflate stream (no zlib header) and returns
+    /// both the decompressed data and the number of compressed bytes consumed.
+    /// Useful for packfile parsing where streams are concatenated.
+    static func inflateRaw(_ bytes: [UInt8]) throws -> (data: Data, bytesRead: Int) {
+        var reader = BitReader(data: bytes)
+        let output = try inflateStream(reader: &reader)
+        return (output, reader.totalBytesConsumed)
     }
 
     /// Compresses data using zlib (deflate with zlib wrapper).
@@ -89,31 +97,39 @@ enum GKZlib {
 
     // MARK: - Inflate (Deflate Decompression)
 
-    private static func inflate(_ data: Data) throws -> Data {
+    private static func inflate(_ bytes: [UInt8]) throws -> Data {
+        var reader = BitReader(data: bytes)
+        return try inflateStream(reader: &reader)
+    }
+
+    private static func inflateStream(reader: inout BitReader) throws -> Data {
         var output = Data()
-        var bitReader = BitReader(data: Array(data))
 
         var isFinal = false
         while !isFinal {
-            isFinal = try bitReader.readBit() == 1
-            let blockType = try bitReader.readBits(2)
+            isFinal = try reader.readBit() == 1
+            let blockType = try reader.readBits(2)
 
             switch blockType {
             case 0:
                 // No compression (stored block)
-                bitReader.alignToByte()
-                let len = try bitReader.readUInt16LE()
-                let _ = try bitReader.readUInt16LE() // NLEN
-                let blockData = try bitReader.readBytes(Int(len))
+                reader.alignToByte()
+                let len = try reader.readUInt16LE()
+                let _ = try reader.readUInt16LE() // NLEN
+                let blockData = try reader.readBytes(Int(len))
                 output.append(contentsOf: blockData)
 
             case 1:
                 // Fixed Huffman codes
-                try inflateBlock(bitReader: &bitReader, output: &output, useFixedCodes: true)
+                try inflateHuffmanBlock(reader: &reader, output: &output,
+                                        litLenTree: HuffmanTree.fixedLitLen,
+                                        distTree: HuffmanTree.fixedDist)
 
             case 2:
                 // Dynamic Huffman codes
-                try inflateBlock(bitReader: &bitReader, output: &output, useFixedCodes: false)
+                let (litLenTree, distTree) = try decodeDynamicTrees(reader: &reader)
+                try inflateHuffmanBlock(reader: &reader, output: &output,
+                                        litLenTree: litLenTree, distTree: distTree)
 
             default:
                 throw GKError.zlibError("Invalid deflate block type: \(blockType)")
@@ -123,19 +139,14 @@ enum GKZlib {
         return output
     }
 
-    private static func inflateBlock(bitReader: inout BitReader, output: inout Data, useFixedCodes: Bool) throws {
-        let litLenTree: HuffmanTree
-        let distTree: HuffmanTree
-
-        if useFixedCodes {
-            litLenTree = HuffmanTree.fixedLitLen
-            distTree = HuffmanTree.fixedDist
-        } else {
-            (litLenTree, distTree) = try decodeDynamicTrees(bitReader: &bitReader)
-        }
-
+    private static func inflateHuffmanBlock(
+        reader: inout BitReader,
+        output: inout Data,
+        litLenTree: HuffmanTree,
+        distTree: HuffmanTree
+    ) throws {
         while true {
-            let symbol = try litLenTree.decode(bitReader: &bitReader)
+            let symbol = try litLenTree.decode(reader: &reader)
 
             if symbol == 256 {
                 break // End of block
@@ -143,12 +154,15 @@ enum GKZlib {
                 output.append(UInt8(symbol))
             } else {
                 // Length/distance pair
-                let length = try decodeLength(symbol: symbol, bitReader: &bitReader)
-                let distSymbol = try distTree.decode(bitReader: &bitReader)
-                let distance = try decodeDistance(symbol: distSymbol, bitReader: &bitReader)
+                let length = try decodeLength(symbol: symbol, reader: &reader)
+                let distSymbol = try distTree.decode(reader: &reader)
+                let distance = try decodeDistance(symbol: distSymbol, reader: &reader)
 
-                // Copy from back-reference
+                // Copy from back-reference (byte-by-byte for overlapping copies)
                 let startIdx = output.count - distance
+                guard startIdx >= 0 else {
+                    throw GKError.zlibError("Invalid back-reference distance \(distance) with output size \(output.count)")
+                }
                 for i in 0..<length {
                     output.append(output[startIdx + i])
                 }
@@ -156,12 +170,16 @@ enum GKZlib {
         }
     }
 
-    // MARK: - Huffman Tree
+    // MARK: - Huffman Tree (Canonical, Lookup-Table Based)
 
+    /// A canonical Huffman tree built from code lengths.
+    /// Uses a flat lookup table for fast decoding.
     private struct HuffmanTree {
-        let maxBits: Int
-        let counts: [Int]
-        let symbols: [Int]
+        /// For each (bitLength, code) pair we store the symbol.
+        /// Organized as: for each bit length, the symbols in code-order.
+        private let symbolsByLength: [[Int]] // index = bitLength (1...maxBits)
+        private let firstCodes: [Int]        // first canonical code at each bit length
+        private let maxBits: Int
 
         static let fixedLitLen: HuffmanTree = {
             var lengths = [Int](repeating: 0, count: 288)
@@ -181,99 +199,56 @@ enum GKZlib {
             let maxBits = lengths.max() ?? 0
             self.maxBits = maxBits
 
-            var blCount = [Int](repeating: 0, count: maxBits + 1)
-            for length in lengths where length > 0 {
-                blCount[length] += 1
-            }
-            self.counts = blCount
-
-            // Generate codes
-            var nextCode = [Int](repeating: 0, count: maxBits + 1)
-            var code = 0
-            for bits in 1...maxBits {
-                code = (code + blCount[bits - 1]) << 1
-                nextCode[bits] = code
-            }
-
-            // Build symbol table
-            var symbolTable = [Int](repeating: -1, count: lengths.count)
-            for n in 0..<lengths.count {
-                let len = lengths[n]
-                if len != 0 {
-                    symbolTable[n] = nextCode[len]
-                    nextCode[len] += 1
-                }
-            }
-            self.symbols = symbolTable
-        }
-
-        func decode(bitReader: inout BitReader) throws -> Int {
-            var code = 0
-            for bits in 1...maxBits {
-                code = (code << 1) | (try bitReader.readBit())
-                // Search for matching symbol
-                for (symbol, symbolCode) in symbols.enumerated() {
-                    if symbolCode == code && bits < counts.count {
-                        // Verify this symbol has this bit length
-                        // We need a different approach - use a lookup
-                        let _ = symbol
-                    }
-                }
-            }
-            // Fallback: use linear search with bit lengths
-            throw GKError.zlibError("Failed to decode Huffman symbol")
-        }
-    }
-
-    // Simplified Huffman decoder using a different strategy
-    private struct HuffmanDecoder {
-        private let table: [(symbol: Int, length: Int)]
-        private let maxBits: Int
-
-        init(lengths: [Int]) {
-            let maxBits = lengths.max() ?? 0
-            self.maxBits = maxBits
-
             guard maxBits > 0 else {
-                self.table = []
+                self.symbolsByLength = []
+                self.firstCodes = []
                 return
             }
 
-            // Build canonical Huffman table
+            // Count codes of each length
             var blCount = [Int](repeating: 0, count: maxBits + 1)
-            for l in lengths where l > 0 { blCount[l] += 1 }
+            for len in lengths where len > 0 {
+                blCount[len] += 1
+            }
 
-            var nextCode = [Int](repeating: 0, count: maxBits + 1)
+            // Compute first code for each bit length (canonical Huffman)
+            var firstCode = [Int](repeating: 0, count: maxBits + 1)
             var code = 0
             for bits in 1...maxBits {
                 code = (code + blCount[bits - 1]) << 1
-                nextCode[bits] = code
+                firstCode[bits] = code
             }
+            self.firstCodes = firstCode
 
-            var entries = [(symbol: Int, length: Int, code: Int)]()
-            for (sym, len) in lengths.enumerated() where len > 0 {
-                entries.append((sym, len, nextCode[len]))
-                nextCode[len] += 1
+            // Collect symbols grouped by their bit length, in code-order
+            // Within the same bit length, symbols with lower numeric value come first
+            // (canonical Huffman assignment)
+            var byLength = [[Int]](repeating: [], count: maxBits + 1)
+            for (symbol, len) in lengths.enumerated() where len > 0 {
+                byLength[len].append(symbol)
             }
-
-            // Sort by code length then code value for efficient lookup
-            self.table = entries.sorted { ($0.length, $0.code) < ($1.length, $1.code) }
-                .map { ($0.symbol, $0.length) }
+            self.symbolsByLength = byLength
         }
 
-        func decode(bitReader: inout BitReader) throws -> Int {
+        func decode(reader: inout BitReader) throws -> Int {
+            guard maxBits > 0 else {
+                throw GKError.zlibError("Cannot decode from empty Huffman tree")
+            }
+
             var code = 0
-            var currentEntryIdx = 0
-
             for bits in 1...maxBits {
-                code = (code << 1) | (try bitReader.readBit())
+                code = (code << 1) | (try reader.readBit())
 
-                // Check all symbols with this bit length
-                while currentEntryIdx < table.count && table[currentEntryIdx].length == bits {
-                    // We need the actual code values, so let's rebuild
-                    break
+                let syms = symbolsByLength[bits]
+                guard !syms.isEmpty else { continue }
+
+                let first = firstCodes[bits]
+                let index = code - first
+                if index >= 0 && index < syms.count {
+                    return syms[index]
                 }
             }
+
             throw GKError.zlibError("Invalid Huffman code")
         }
     }
@@ -287,6 +262,11 @@ enum GKZlib {
 
         init(data: [UInt8]) {
             self.data = data
+        }
+
+        /// The total number of bytes consumed so far (rounded up if mid-byte).
+        var totalBytesConsumed: Int {
+            bitPos > 0 ? bytePos + 1 : bytePos
         }
 
         mutating func readBit() throws -> Int {
@@ -358,61 +338,64 @@ enum GKZlib {
         7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13
     ]
 
-    private static func decodeLength(symbol: Int, bitReader: inout BitReader) throws -> Int {
+    private static func decodeLength(symbol: Int, reader: inout BitReader) throws -> Int {
         let index = symbol - 257
-        guard index < lengthBase.count else {
+        guard index >= 0 && index < lengthBase.count else {
             throw GKError.zlibError("Invalid length symbol: \(symbol)")
         }
         let base = lengthBase[index]
         let extra = lengthExtra[index]
-        let extraBits = extra > 0 ? try bitReader.readBits(extra) : 0
+        let extraBits = extra > 0 ? try reader.readBits(extra) : 0
         return base + extraBits
     }
 
-    private static func decodeDistance(symbol: Int, bitReader: inout BitReader) throws -> Int {
-        guard symbol < distBase.count else {
+    private static func decodeDistance(symbol: Int, reader: inout BitReader) throws -> Int {
+        guard symbol >= 0 && symbol < distBase.count else {
             throw GKError.zlibError("Invalid distance symbol: \(symbol)")
         }
         let base = distBase[symbol]
         let extra = distExtra[symbol]
-        let extraBits = extra > 0 ? try bitReader.readBits(extra) : 0
+        let extraBits = extra > 0 ? try reader.readBits(extra) : 0
         return base + extraBits
     }
 
-    private static func decodeDynamicTrees(bitReader: inout BitReader) throws -> (HuffmanTree, HuffmanTree) {
-        let hlit = try bitReader.readBits(5) + 257
-        let hdist = try bitReader.readBits(5) + 1
-        let hclen = try bitReader.readBits(4) + 4
+    private static func decodeDynamicTrees(reader: inout BitReader) throws -> (HuffmanTree, HuffmanTree) {
+        let hlit = try reader.readBits(5) + 257
+        let hdist = try reader.readBits(5) + 1
+        let hclen = try reader.readBits(4) + 4
 
         let codeLengthOrder = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
         var codeLengths = [Int](repeating: 0, count: 19)
 
         for i in 0..<hclen {
-            codeLengths[codeLengthOrder[i]] = try bitReader.readBits(3)
+            codeLengths[codeLengthOrder[i]] = try reader.readBits(3)
         }
 
         let codeLenTree = HuffmanTree(lengths: codeLengths)
 
         var lengths = [Int]()
+        lengths.reserveCapacity(hlit + hdist)
         let totalCodes = hlit + hdist
 
         while lengths.count < totalCodes {
-            let sym = try codeLenTree.decode(bitReader: &bitReader)
+            let sym = try codeLenTree.decode(reader: &reader)
             switch sym {
             case 0..<16:
                 lengths.append(sym)
             case 16:
-                let count = try bitReader.readBits(2) + 3
-                let last = lengths.last ?? 0
+                guard let last = lengths.last else {
+                    throw GKError.zlibError("Code length 16 with no previous length")
+                }
+                let count = try reader.readBits(2) + 3
                 lengths.append(contentsOf: [Int](repeating: last, count: count))
             case 17:
-                let count = try bitReader.readBits(3) + 3
+                let count = try reader.readBits(3) + 3
                 lengths.append(contentsOf: [Int](repeating: 0, count: count))
             case 18:
-                let count = try bitReader.readBits(7) + 11
+                let count = try reader.readBits(7) + 11
                 lengths.append(contentsOf: [Int](repeating: 0, count: count))
             default:
-                throw GKError.zlibError("Invalid code length symbol")
+                throw GKError.zlibError("Invalid code length symbol: \(sym)")
             }
         }
 
