@@ -387,3 +387,600 @@ struct GKIndexTests {
         #expect(index.entries.isEmpty)
     }
 }
+
+// MARK: - Packfile Test Helpers
+
+/// Builders for constructing packfiles (including delta entries) used by the
+/// packfile-parsing tests.
+enum PackTestHelper {
+    /// Encodes a pack entry header: 3-bit type + little-endian size.
+    static func entryHeader(type: UInt8, size: Int) -> [UInt8] {
+        var bytes = [UInt8]()
+        var s = size
+        var first = (type << 4) | UInt8(s & 0x0F)
+        s >>= 4
+        if s > 0 { first |= 0x80 }
+        bytes.append(first)
+        while s > 0 {
+            var b = UInt8(s & 0x7F)
+            s >>= 7
+            if s > 0 { b |= 0x80 }
+            bytes.append(b)
+        }
+        return bytes
+    }
+
+    /// Encodes an OFS_DELTA negative base offset (big-endian, +1 carry).
+    static func encodeOffset(_ value: Int) -> [UInt8] {
+        var n = value
+        var bytes = [UInt8(n & 0x7F)]
+        n >>= 7
+        while n > 0 {
+            n -= 1
+            bytes.insert(UInt8((n & 0x7F) | 0x80), at: 0)
+            n >>= 7
+        }
+        return bytes
+    }
+
+    /// Encodes a delta size field (little-endian, 7-bits-per-byte varint).
+    static func encodeDeltaSize(_ size: Int) -> [UInt8] {
+        var s = size
+        var bytes = [UInt8]()
+        repeat {
+            var b = UInt8(s & 0x7F)
+            s >>= 7
+            if s > 0 { b |= 0x80 }
+            bytes.append(b)
+        } while s > 0
+        return bytes
+    }
+
+    /// Builds a copy instruction (copy `size` bytes from base at `offset`).
+    static func copyInstruction(offset: Int, size: Int) -> [UInt8] {
+        var opcode: UInt8 = 0x80
+        var rest = [UInt8]()
+        for i in 0..<4 {
+            let byte = UInt8((offset >> (8 * i)) & 0xFF)
+            if byte != 0 { opcode |= UInt8(1 << i); rest.append(byte) }
+        }
+        for i in 0..<3 {
+            let byte = UInt8((size >> (8 * i)) & 0xFF)
+            if byte != 0 { opcode |= UInt8(1 << (4 + i)); rest.append(byte) }
+        }
+        return [opcode] + rest
+    }
+
+    /// Builds an insert instruction appending `data` literally (< 128 bytes).
+    static func insertInstruction(_ data: [UInt8]) -> [UInt8] {
+        [UInt8(data.count)] + data
+    }
+
+    /// Assembles a delta payload from base/result sizes and instructions.
+    static func delta(baseSize: Int, resultSize: Int, instructions: [[UInt8]]) -> Data {
+        var bytes = encodeDeltaSize(baseSize) + encodeDeltaSize(resultSize)
+        for ins in instructions { bytes += ins }
+        return Data(bytes)
+    }
+
+    /// Builds a complete pack entry, compressing the payload.
+    static func entry(type: UInt8, payload: Data, baseRef: [UInt8] = []) throws -> [UInt8] {
+        var bytes = entryHeader(type: type, size: payload.count)
+        bytes += baseRef
+        bytes += [UInt8](try GKZlib.compress(payload))
+        return bytes
+    }
+
+    /// Assembles a v2 packfile from raw entry byte arrays, appending the trailer.
+    static func pack(entries: [[UInt8]]) -> Data {
+        var bytes: [UInt8] = [0x50, 0x41, 0x43, 0x4B, 0, 0, 0, 2]
+        let count = UInt32(entries.count)
+        bytes += [UInt8(count >> 24), UInt8(count >> 16), UInt8(count >> 8), UInt8(count & 0xFF)]
+        for e in entries { bytes += e }
+        bytes += GKSHA1.hash(Data(bytes))
+        return Data(bytes)
+    }
+
+    /// Big-endian 4-byte encoding.
+    static func beUInt32(_ v: UInt32) -> [UInt8] {
+        [UInt8((v >> 24) & 0xFF), UInt8((v >> 16) & 0xFF), UInt8((v >> 8) & 0xFF), UInt8(v & 0xFF)]
+    }
+
+    /// Builds a v2 pack index (`.idx`) mapping each OID to its pack offset.
+    /// Offsets ≥ 2^31 are emitted via the 8-byte large-offset table.
+    static func index(_ entries: [(oid: GKObjectID, offset: Int)]) -> Data {
+        let sorted = entries.sorted { $0.oid < $1.oid }
+
+        var bytes: [UInt8] = [0xFF, 0x74, 0x4F, 0x63, 0, 0, 0, 2]
+
+        // Fanout: cumulative counts by first OID byte.
+        var fanout = [UInt32](repeating: 0, count: 256)
+        for entry in sorted {
+            let b = Int(entry.oid.bytes[0])
+            for i in b..<256 { fanout[i] += 1 }
+        }
+        for f in fanout { bytes += beUInt32(f) }
+
+        // Sorted OID table.
+        for entry in sorted { bytes += entry.oid.bytes }
+
+        // CRC table (zeros — not validated by the reader).
+        for _ in sorted { bytes += [0, 0, 0, 0] }
+
+        // Offset table, spilling to the large-offset table when needed.
+        var largeOffsets = [UInt64]()
+        for entry in sorted {
+            if entry.offset < 0x8000_0000 {
+                bytes += beUInt32(UInt32(entry.offset))
+            } else {
+                bytes += beUInt32(0x8000_0000 | UInt32(largeOffsets.count))
+                largeOffsets.append(UInt64(entry.offset))
+            }
+        }
+        for large in largeOffsets {
+            for i in stride(from: 56, through: 0, by: -8) {
+                bytes.append(UInt8((large >> UInt64(i)) & 0xFF))
+            }
+        }
+
+        // Packfile checksum + index checksum (zeros — not validated by the reader).
+        bytes += [UInt8](repeating: 0, count: 40)
+        return Data(bytes)
+    }
+}
+
+// MARK: - Zlib Stream Tests
+
+@Suite("GKZlib stream")
+struct GKZlibStreamTests {
+    @Test func inflateZlibStreamRoundTrip() throws {
+        let original = Data("the quick brown fox jumps over the lazy dog".utf8)
+        let compressed = try GKZlib.compress(original)
+        // Append trailing bytes to ensure the stream length is reported, not the buffer length.
+        let buffer = [UInt8](compressed) + [0xDE, 0xAD, 0xBE, 0xEF]
+
+        let (data, bytesRead) = try GKZlib.inflateZlibStream(buffer)
+        #expect(data == original)
+        #expect(bytesRead == compressed.count)
+    }
+}
+
+// MARK: - Packfile Reader Tests
+
+@Suite("GKPackfileReader")
+struct GKPackfileReaderTests {
+    @Test func roundTripBaseObjects() throws {
+        let blob = GKRawObject(type: .blob, data: Data("hello world".utf8))
+        let tree = GKRawObject(type: .tree, data: Data("tree contents".utf8))
+        let commit = GKRawObject(type: .commit, data: Data("commit body".utf8))
+
+        let packData = try GKPackfileWriter.createPackfile(objects: [blob, tree, commit])
+        let parsed = try GKPackfileReader.parse(packData)
+
+        let parsedOIDs = Set(parsed.map { $0.oid })
+        #expect(parsedOIDs == Set([blob.oid, tree.oid, commit.oid]))
+    }
+
+    @Test func resolveOfsDelta() throws {
+        let baseData = Data("hello world".utf8)
+        let expected = Data("hello world!!".utf8)
+
+        let baseEntry = try PackTestHelper.entry(type: 3, payload: baseData) // blob
+        let baseStart = 12
+
+        let deltaPayload = PackTestHelper.delta(
+            baseSize: baseData.count,
+            resultSize: expected.count,
+            instructions: [
+                PackTestHelper.copyInstruction(offset: 0, size: baseData.count),
+                PackTestHelper.insertInstruction(Array("!!".utf8))
+            ]
+        )
+        let deltaStart = baseStart + baseEntry.count
+        let negOffset = deltaStart - baseStart
+        let deltaEntry = try PackTestHelper.entry(
+            type: 6, // OFS_DELTA
+            payload: deltaPayload,
+            baseRef: PackTestHelper.encodeOffset(negOffset)
+        )
+
+        let packData = PackTestHelper.pack(entries: [baseEntry, deltaEntry])
+        let parsed = try GKPackfileReader.parse(packData)
+
+        let resolved = parsed.first { GKRawObject(type: .blob, data: expected).oid == $0.oid }
+        #expect(resolved != nil)
+        #expect(resolved?.type == .blob)
+        #expect(resolved?.data == expected)
+    }
+
+    @Test func resolveRefDeltaInPack() throws {
+        let baseObject = GKRawObject(type: .blob, data: Data("base content".utf8))
+        let expected = Data("base content!".utf8)
+
+        let baseEntry = try PackTestHelper.entry(type: 3, payload: baseObject.data)
+        let deltaPayload = PackTestHelper.delta(
+            baseSize: baseObject.data.count,
+            resultSize: expected.count,
+            instructions: [
+                PackTestHelper.copyInstruction(offset: 0, size: baseObject.data.count),
+                PackTestHelper.insertInstruction(Array("!".utf8))
+            ]
+        )
+        let deltaEntry = try PackTestHelper.entry(
+            type: 7, // REF_DELTA
+            payload: deltaPayload,
+            baseRef: baseObject.oid.bytes
+        )
+
+        let packData = PackTestHelper.pack(entries: [baseEntry, deltaEntry])
+        let parsed = try GKPackfileReader.parse(packData)
+
+        let resolved = parsed.first { $0.data == expected }
+        #expect(resolved != nil)
+        #expect(resolved?.type == .blob)
+    }
+
+    @Test func resolveRefDeltaThinPack() throws {
+        let baseObject = GKRawObject(type: .blob, data: Data("external base".utf8))
+        let expected = Data("external base?".utf8)
+
+        let deltaPayload = PackTestHelper.delta(
+            baseSize: baseObject.data.count,
+            resultSize: expected.count,
+            instructions: [
+                PackTestHelper.copyInstruction(offset: 0, size: baseObject.data.count),
+                PackTestHelper.insertInstruction(Array("?".utf8))
+            ]
+        )
+        let deltaEntry = try PackTestHelper.entry(
+            type: 7,
+            payload: deltaPayload,
+            baseRef: baseObject.oid.bytes
+        )
+
+        let packData = PackTestHelper.pack(entries: [deltaEntry])
+        let parsed = try GKPackfileReader.parse(packData) { oid in
+            oid == baseObject.oid ? baseObject : nil
+        }
+
+        #expect(parsed.count == 1)
+        #expect(parsed.first?.data == expected)
+        #expect(parsed.first?.type == .blob)
+    }
+
+    @Test func unresolvableRefDeltaThrows() throws {
+        let missingOID = GKObjectID(hex: "1111111111111111111111111111111111111111")!
+        let deltaPayload = PackTestHelper.delta(
+            baseSize: 4,
+            resultSize: 4,
+            instructions: [PackTestHelper.insertInstruction(Array("data".utf8))]
+        )
+        let deltaEntry = try PackTestHelper.entry(type: 7, payload: deltaPayload, baseRef: missingOID.bytes)
+        let packData = PackTestHelper.pack(entries: [deltaEntry])
+
+        #expect(throws: GKError.self) {
+            _ = try GKPackfileReader.parse(packData)
+        }
+    }
+
+    @Test func resolveChainedDeltas() throws {
+        let baseData = Data("abc".utf8)
+        let level1 = Data("abcd".utf8)
+        let level2 = Data("abcde".utf8)
+
+        let baseEntry = try PackTestHelper.entry(type: 3, payload: baseData)
+        let baseStart = 12
+
+        // Delta 1: base -> level1
+        let delta1 = PackTestHelper.delta(
+            baseSize: baseData.count,
+            resultSize: level1.count,
+            instructions: [
+                PackTestHelper.copyInstruction(offset: 0, size: baseData.count),
+                PackTestHelper.insertInstruction(Array("d".utf8))
+            ]
+        )
+        let delta1Start = baseStart + baseEntry.count
+        let delta1Entry = try PackTestHelper.entry(
+            type: 6,
+            payload: delta1,
+            baseRef: PackTestHelper.encodeOffset(delta1Start - baseStart)
+        )
+
+        // Delta 2: level1 -> level2 (base is delta1)
+        let delta2 = PackTestHelper.delta(
+            baseSize: level1.count,
+            resultSize: level2.count,
+            instructions: [
+                PackTestHelper.copyInstruction(offset: 0, size: level1.count),
+                PackTestHelper.insertInstruction(Array("e".utf8))
+            ]
+        )
+        let delta2Start = delta1Start + delta1Entry.count
+        let delta2Entry = try PackTestHelper.entry(
+            type: 6,
+            payload: delta2,
+            baseRef: PackTestHelper.encodeOffset(delta2Start - delta1Start)
+        )
+
+        let packData = PackTestHelper.pack(entries: [baseEntry, delta1Entry, delta2Entry])
+        let parsed = try GKPackfileReader.parse(packData)
+
+        #expect(parsed.contains { $0.data == level2 })
+    }
+
+    @Test func corruptedTrailerThrows() throws {
+        let blob = GKRawObject(type: .blob, data: Data("trailer test".utf8))
+        var packData = try GKPackfileWriter.createPackfile(objects: [blob])
+        // Corrupt the final checksum byte.
+        let lastIndex = packData.count - 1
+        packData[lastIndex] = packData[lastIndex] ^ 0xFF
+
+        #expect(throws: GKError.self) {
+            _ = try GKPackfileReader.parse(packData)
+        }
+    }
+}
+
+// MARK: - Pack Index Tests
+
+@Suite("GKPackIndex")
+struct GKPackIndexTests {
+    @Test func lookupAndContains() throws {
+        let a = GKObjectID(hex: "0011223344556677889900112233445566778899")!
+        let b = GKObjectID(hex: "aabbccddeeff00112233445566778899aabbccdd")!
+        let missing = GKObjectID(hex: "ffffffffffffffffffffffffffffffffffffffff")!
+
+        let idxData = PackTestHelper.index([(a, 12), (b, 4096)])
+        let index = try GKPackIndex(data: idxData)
+
+        #expect(index.objectCount == 2)
+        #expect(index.offset(for: a) == 12)
+        #expect(index.offset(for: b) == 4096)
+        #expect(index.offset(for: missing) == nil)
+        #expect(index.contains(a))
+        #expect(!index.contains(missing))
+    }
+
+    @Test func resolvesLargeOffsets() throws {
+        let oid = GKObjectID(hex: "1234567890abcdef1234567890abcdef12345678")!
+        let bigOffset = 0x1_0000_0000 // 4 GiB, requires the large-offset table
+
+        let idxData = PackTestHelper.index([(oid, bigOffset)])
+        let index = try GKPackIndex(data: idxData)
+
+        #expect(index.offset(for: oid) == UInt64(bigOffset))
+    }
+
+    @Test func invalidIndexThrows() {
+        let bogus = Data([0x00, 0x01, 0x02, 0x03] + [UInt8](repeating: 0, count: 2048))
+        #expect(throws: GKError.self) {
+            _ = try GKPackIndex(data: bogus)
+        }
+    }
+}
+
+// MARK: - Pack Random-Access Tests
+
+@Suite("GKPackRandomAccess")
+struct GKPackRandomAccessTests {
+    /// Builds a pack from payload entries and returns the pack bytes plus the
+    /// byte offset of each entry.
+    private func buildPack(_ entries: [[UInt8]]) -> (bytes: [UInt8], offsets: [Int]) {
+        var offsets = [Int]()
+        var running = 12 // header
+        for e in entries {
+            offsets.append(running)
+            running += e.count
+        }
+        let packData = PackTestHelper.pack(entries: entries)
+        return ([UInt8](packData), offsets)
+    }
+
+    @Test func readsNonDeltaObject() throws {
+        let blob = GKRawObject(type: .blob, data: Data("a base blob".utf8))
+        let entry = try PackTestHelper.entry(type: 3, payload: blob.data)
+        let (bytes, offsets) = buildPack([entry])
+
+        let read = try GKPackfileReader.readObject(at: offsets[0], in: bytes)
+        #expect(read.oid == blob.oid)
+        #expect(read.type == .blob)
+        #expect(read.data == blob.data)
+    }
+
+    @Test func readsOfsDelta() throws {
+        let baseData = Data("hello world".utf8)
+        let expected = Data("hello world!!".utf8)
+
+        let baseEntry = try PackTestHelper.entry(type: 3, payload: baseData)
+        let deltaPayload = PackTestHelper.delta(
+            baseSize: baseData.count,
+            resultSize: expected.count,
+            instructions: [
+                PackTestHelper.copyInstruction(offset: 0, size: baseData.count),
+                PackTestHelper.insertInstruction(Array("!!".utf8))
+            ]
+        )
+        // Offsets: base at 12, delta right after.
+        let deltaStart = 12 + baseEntry.count
+        let deltaEntry = try PackTestHelper.entry(
+            type: 6,
+            payload: deltaPayload,
+            baseRef: PackTestHelper.encodeOffset(deltaStart - 12)
+        )
+        let (bytes, offsets) = buildPack([baseEntry, deltaEntry])
+
+        let read = try GKPackfileReader.readObject(at: offsets[1], in: bytes)
+        #expect(read.type == .blob)
+        #expect(read.data == expected)
+    }
+
+    @Test func readsRefDeltaWithinPack() throws {
+        let base = GKRawObject(type: .blob, data: Data("base content".utf8))
+        let expected = Data("base content!".utf8)
+
+        let baseEntry = try PackTestHelper.entry(type: 3, payload: base.data)
+        let deltaPayload = PackTestHelper.delta(
+            baseSize: base.data.count,
+            resultSize: expected.count,
+            instructions: [
+                PackTestHelper.copyInstruction(offset: 0, size: base.data.count),
+                PackTestHelper.insertInstruction(Array("!".utf8))
+            ]
+        )
+        let deltaEntry = try PackTestHelper.entry(type: 7, payload: deltaPayload, baseRef: base.oid.bytes)
+        let (bytes, offsets) = buildPack([baseEntry, deltaEntry])
+
+        let idx = try GKPackIndex(data: PackTestHelper.index([(base.oid, offsets[0])]))
+        let read = try GKPackfileReader.readObject(
+            at: offsets[1],
+            in: bytes,
+            offsetForOID: { idx.offset(for: $0).map(Int.init) }
+        )
+        #expect(read.type == .blob)
+        #expect(read.data == expected)
+    }
+
+    @Test func readsRefDeltaViaBaseLookup() throws {
+        let base = GKRawObject(type: .blob, data: Data("external base".utf8))
+        let expected = Data("external base?".utf8)
+
+        let deltaPayload = PackTestHelper.delta(
+            baseSize: base.data.count,
+            resultSize: expected.count,
+            instructions: [
+                PackTestHelper.copyInstruction(offset: 0, size: base.data.count),
+                PackTestHelper.insertInstruction(Array("?".utf8))
+            ]
+        )
+        let deltaEntry = try PackTestHelper.entry(type: 7, payload: deltaPayload, baseRef: base.oid.bytes)
+        let (bytes, offsets) = buildPack([deltaEntry])
+
+        let read = try GKPackfileReader.readObject(
+            at: offsets[0],
+            in: bytes,
+            baseLookup: { $0 == base.oid ? base : nil }
+        )
+        #expect(read.data == expected)
+        #expect(read.type == .blob)
+    }
+
+    @Test func readsChainedDelta() throws {
+        let baseData = Data("abc".utf8)
+        let level1 = Data("abcd".utf8)
+        let level2 = Data("abcde".utf8)
+
+        let baseEntry = try PackTestHelper.entry(type: 3, payload: baseData)
+        let delta1 = PackTestHelper.delta(
+            baseSize: baseData.count, resultSize: level1.count,
+            instructions: [
+                PackTestHelper.copyInstruction(offset: 0, size: baseData.count),
+                PackTestHelper.insertInstruction(Array("d".utf8))
+            ])
+        let delta1Start = 12 + baseEntry.count
+        let delta1Entry = try PackTestHelper.entry(
+            type: 6, payload: delta1, baseRef: PackTestHelper.encodeOffset(delta1Start - 12))
+
+        let delta2 = PackTestHelper.delta(
+            baseSize: level1.count, resultSize: level2.count,
+            instructions: [
+                PackTestHelper.copyInstruction(offset: 0, size: level1.count),
+                PackTestHelper.insertInstruction(Array("e".utf8))
+            ])
+        let delta2Start = delta1Start + delta1Entry.count
+        let delta2Entry = try PackTestHelper.entry(
+            type: 6, payload: delta2, baseRef: PackTestHelper.encodeOffset(delta2Start - delta1Start))
+
+        let (bytes, offsets) = buildPack([baseEntry, delta1Entry, delta2Entry])
+        let read = try GKPackfileReader.readObject(at: offsets[2], in: bytes)
+        #expect(read.data == level2)
+    }
+
+    @Test func parityWithWholePackParse() throws {
+        let b1 = GKRawObject(type: .blob, data: Data("first blob".utf8))
+        let b2 = GKRawObject(type: .blob, data: Data("second blob, a bit longer".utf8))
+        let expectedDelta = Data("second blob, a bit longer!!!".utf8)
+
+        let e1 = try PackTestHelper.entry(type: 3, payload: b1.data)
+        let e2 = try PackTestHelper.entry(type: 3, payload: b2.data)
+        let deltaPayload = PackTestHelper.delta(
+            baseSize: b2.data.count, resultSize: expectedDelta.count,
+            instructions: [
+                PackTestHelper.copyInstruction(offset: 0, size: b2.data.count),
+                PackTestHelper.insertInstruction(Array("!!!".utf8))
+            ])
+        let e2Start = 12 + e1.count
+        let e3Start = e2Start + e2.count
+        let e3 = try PackTestHelper.entry(
+            type: 6, payload: deltaPayload, baseRef: PackTestHelper.encodeOffset(e3Start - e2Start))
+
+        let (bytes, offsets) = buildPack([e1, e2, e3])
+        let packData = Data(bytes)
+
+        // Whole-pack parse returns objects in entry order.
+        let parsed = try GKPackfileReader.parse(packData)
+        let idxEntries = zip(parsed, offsets).map { ($0.oid, $1) }
+        let idx = try GKPackIndex(data: PackTestHelper.index(idxEntries))
+
+        for (object, offset) in zip(parsed, offsets) {
+            let read = try GKPackfileReader.readObject(
+                at: offset, in: bytes,
+                offsetForOID: { idx.offset(for: $0).map(Int.init) })
+            #expect(read.oid == object.oid)
+            #expect(read.data == object.data)
+        }
+    }
+}
+
+// MARK: - Object Database Pack Tests
+
+@Suite("GKLooseObjectDatabase packs")
+struct GKLooseObjectDatabasePackTests {
+    private func makeObjectsDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gkdb-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: dir.appendingPathComponent("pack"), withIntermediateDirectories: true)
+        return dir
+    }
+
+    @Test func resolvesPackedObjectWithoutIndex() throws {
+        let objectsDir = try makeObjectsDir()
+        defer { try? FileManager.default.removeItem(at: objectsDir) }
+
+        let blob = GKRawObject(type: .blob, data: Data("packed but unindexed".utf8))
+        let packData = try GKPackfileWriter.createPackfile(objects: [blob])
+        // Write a .pack with NO accompanying .idx.
+        try packData.write(to: objectsDir.appendingPathComponent("pack/pack-test.pack"))
+
+        let db = GKLooseObjectDatabase(objectsURL: objectsDir)
+        #expect(db.exists(oid: blob.oid))
+        let read = try db.read(oid: blob.oid)
+        #expect(read.oid == blob.oid)
+        #expect(read.data == blob.data)
+    }
+
+    @Test func repeatedReadServedFromCache() throws {
+        let objectsDir = try makeObjectsDir()
+        defer { try? FileManager.default.removeItem(at: objectsDir) }
+
+        let db = GKLooseObjectDatabase(objectsURL: objectsDir)
+        let blob = GKRawObject(type: .blob, data: Data("cache me".utf8))
+        try db.write(blob)
+
+        // First read populates the cache.
+        let first = try db.read(oid: blob.oid)
+        #expect(first.oid == blob.oid)
+
+        // Remove the backing loose file; a cached read must still succeed.
+        let hex = blob.oid.hex
+        let loosePath = objectsDir
+            .appendingPathComponent(String(hex.prefix(2)))
+            .appendingPathComponent(String(hex.dropFirst(2)))
+        try FileManager.default.removeItem(at: loosePath)
+
+        let second = try db.read(oid: blob.oid)
+        #expect(second.oid == blob.oid)
+        #expect(second.data == blob.data)
+    }
+}

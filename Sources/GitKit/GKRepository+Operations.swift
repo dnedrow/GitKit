@@ -782,70 +782,17 @@ extension GKRepository {
     }
 
     func unpackPackData(_ data: Data) throws {
-        // Simplified: just store raw objects from pack
-        // A full implementation would parse the packfile format
-        // For now, this handles thin packs by delegating to the object DB
         guard data.count > 12 else { return }
 
-        let bytes = Array(data)
-
-        // Verify PACK header
-        guard bytes[0] == 0x50, bytes[1] == 0x41, bytes[2] == 0x43, bytes[3] == 0x4B else {
-            throw GKError.packfileError("Invalid packfile header")
+        // Parse the pack into fully-materialized objects, resolving OFS_DELTA
+        // and REF_DELTA entries. REF_DELTA bases outside the pack (thin packs)
+        // are resolved against the repository's existing object database.
+        let objects = try GKPackfileReader.parse(data) { [objectDB] oid in
+            objectDB.exists(oid: oid) ? try? objectDB.read(oid: oid) : nil
         }
 
-        // Version
-        let version = UInt32(bytes[4]) << 24 | UInt32(bytes[5]) << 16 |
-                      UInt32(bytes[6]) << 8 | UInt32(bytes[7])
-        guard version == 2 || version == 3 else {
-            throw GKError.packfileError("Unsupported packfile version: \(version)")
-        }
-
-        // Object count
-        let objectCount = Int(UInt32(bytes[8]) << 24 | UInt32(bytes[9]) << 16 |
-                              UInt32(bytes[10]) << 8 | UInt32(bytes[11]))
-
-        var offset = 12
-
-        for _ in 0..<objectCount {
-            guard offset < bytes.count - 20 else { break }
-
-            // Read object header
-            var byte = bytes[offset]
-            let typeNum = (byte >> 4) & 0x07
-            var size = Int(byte & 0x0F)
-            var shift = 4
-            offset += 1
-
-            while byte & 0x80 != 0 {
-                guard offset < bytes.count else { break }
-                byte = bytes[offset]
-                size |= Int(byte & 0x7F) << shift
-                shift += 7
-                offset += 1
-            }
-
-            let objectType: GKObjectType?
-            switch typeNum {
-            case 1: objectType = .commit
-            case 2: objectType = .tree
-            case 3: objectType = .blob
-            case 4: objectType = .tag
-            default: objectType = nil
-            }
-
-            // Decompress the object data
-            if let type = objectType {
-                let remaining = Data(bytes[offset...])
-                if let decompressed = try? GKZlib.decompress(Data([0x78, 0x01]) + remaining) {
-                    let objectData = decompressed.prefix(size)
-                    let raw = GKRawObject(type: type, data: Data(objectData))
-                    try objectDB.write(raw)
-                }
-            }
-
-            // Skip to next object (approximate - full impl would track compressed size)
-            offset += size
+        for object in objects {
+            try objectDB.write(object)
         }
     }
 }

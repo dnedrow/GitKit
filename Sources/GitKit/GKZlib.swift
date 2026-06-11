@@ -35,10 +35,53 @@ enum GKZlib {
     /// Decompresses a raw deflate stream (no zlib header) and returns
     /// both the decompressed data and the number of compressed bytes consumed.
     /// Useful for packfile parsing where streams are concatenated.
-    static func inflateRaw(_ bytes: [UInt8]) throws -> (data: Data, bytesRead: Int) {
-        var reader = BitReader(data: bytes)
+    /// - Parameters:
+    ///   - bytes: The buffer containing the deflate stream.
+    ///   - start: The byte index within `bytes` where the deflate stream begins.
+    static func inflateRaw(_ bytes: [UInt8], from start: Int = 0) throws -> (data: Data, bytesRead: Int) {
+        var reader = BitReader(data: bytes, start: start)
         let output = try inflateStream(reader: &reader)
         return (output, reader.totalBytesConsumed)
+    }
+
+    /// Decompresses a zlib-wrapped stream (RFC 1950) and returns both the
+    /// decompressed data and the total number of compressed bytes consumed,
+    /// including the 2-byte zlib header and the 4-byte Adler-32 trailer.
+    ///
+    /// This is the building block for walking concatenated entries in a
+    /// packfile, where each entry's payload is an independent zlib stream and
+    /// the parser must know exactly where the next entry begins.
+    /// - Parameters:
+    ///   - bytes: The buffer containing the zlib stream.
+    ///   - start: The byte index within `bytes` where the zlib header begins.
+    ///     Passing an offset avoids copying the buffer when reading a single
+    ///     entry from the middle of a packfile.
+    /// - Returns: The decompressed data and the total compressed bytes consumed.
+    static func inflateZlibStream(_ bytes: [UInt8], from start: Int = 0) throws -> (data: Data, bytesRead: Int) {
+        guard bytes.count - start >= 2 else {
+            throw GKError.zlibError("Data too short for zlib header")
+        }
+
+        let cmf = bytes[start]
+        let flg = bytes[start + 1]
+
+        // CMF low nibble must be 8 (deflate method).
+        guard (cmf & 0x0F) == 8 else {
+            throw GKError.zlibError("Invalid zlib compression method: \(cmf & 0x0F)")
+        }
+        guard (UInt16(cmf) * 256 + UInt16(flg)) % 31 == 0 else {
+            throw GKError.zlibError("Invalid zlib header checksum")
+        }
+
+        // Inflate the deflate body that follows the 2-byte header.
+        let (output, deflateBytes) = try inflateRaw(bytes, from: start + 2)
+
+        // header (2) + deflate body + Adler-32 trailer (4)
+        let total = 2 + deflateBytes + 4
+        guard start + total <= bytes.count else {
+            throw GKError.zlibError("Zlib stream extends past available data")
+        }
+        return (output, total)
     }
 
     /// Compresses data using zlib (deflate with zlib wrapper).
@@ -257,16 +300,28 @@ enum GKZlib {
 
     private struct BitReader {
         private let data: [UInt8]
-        private var bytePos: Int = 0
+        private let startByte: Int
+        private var bytePos: Int
         private var bitPos: Int = 0
 
         init(data: [UInt8]) {
             self.data = data
+            self.startByte = 0
+            self.bytePos = 0
         }
 
-        /// The total number of bytes consumed so far (rounded up if mid-byte).
+        /// Creates a reader that begins at `start` within `data`, avoiding a
+        /// copy when decoding a stream embedded mid-buffer.
+        init(data: [UInt8], start: Int) {
+            self.data = data
+            self.startByte = start
+            self.bytePos = start
+        }
+
+        /// The total number of bytes consumed so far (rounded up if mid-byte),
+        /// measured from the stream's start position.
         var totalBytesConsumed: Int {
-            bitPos > 0 ? bytePos + 1 : bytePos
+            (bitPos > 0 ? bytePos + 1 : bytePos) - startByte
         }
 
         mutating func readBit() throws -> Int {
