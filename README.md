@@ -20,6 +20,7 @@ A **pure Swift** implementation of Git, inspired by [libgit2](https://libgit2.or
 - **Protocol-oriented** — swap out storage backends, merge strategies, or transports
 - **Zero dependencies** — only Foundation required
 - **Full Git object model** — blobs, trees, commits, annotated tags
+- **Loose & packed storage** — reads loose objects and packfiles, resolving `OFS_DELTA`/`REF_DELTA` (and thin packs), with `.idx`-based random access
 - **Repository operations** — init, add, commit, branch, checkout, merge, tag, diff, reset, stash
 - **Network-ready** — transport protocol abstraction for fetch, push, pull, and clone
 - **Cross-platform** — macOS, iOS, tvOS, watchOS
@@ -146,6 +147,7 @@ swift test
 ├─────────────────────────────────────────────────────┤
 │              Storage Backends                         │
 │  GKLooseObjectDatabase · GKFileReferenceStorage      │
+│  Packfiles: GKPackIndex · GKPackfileReader/Writer    │
 ├─────────────────────────────────────────────────────┤
 │              Core Object Model                        │
 │  GKObjectID · GKBlob · GKTree · GKCommit · GKTag    │

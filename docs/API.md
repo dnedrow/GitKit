@@ -204,6 +204,8 @@ try repo.GKPush(remote: "origin", branch: "main", transport: myTransport)
 let oid = try repo.GKPull(remote: "origin", branch: "main", transport: myTransport, author: author)
 ```
 
+> **Pack materialization.** Packfiles returned by `GKFetch`/`GKPull`/`GKClone` are parsed and written into the object database, resolving `OFS_DELTA` and `REF_DELTA` entries (with thin-pack bases looked up against existing objects). After a fetch, the received objects are available via normal object lookups.
+
 ## Object Lookup
 
 ```swift
@@ -213,6 +215,8 @@ let tree = try repo.lookupTree(oid: commit.treeOID)
 let blob = try repo.lookupBlob(oid: blobOID)
 let tag = try repo.lookupTag(oid: tagOID)
 ```
+
+> **Loose and packed storage.** Object lookups (and everything built on them — `log`, `status`, `diff`, checkout) resolve objects transparently from either loose files (`.git/objects/xx/…`) or packfiles (`.git/objects/pack/*.pack`). Packed objects are reconstructed on demand, including `OFS_DELTA`/`REF_DELTA` chains and thin-pack bases. When a pack's `.idx` is present, a single object is located via the index and only that object plus its delta base chain is inflated — the whole pack is not parsed. Packs without an index fall back to a full parse.
 
 ## HEAD & References
 
