@@ -388,6 +388,163 @@ struct GKIndexTests {
     }
 }
 
+// MARK: - Status Stat Cache Tests
+
+@Suite("GKStatusStatCache")
+struct GKStatusStatCacheTests {
+    private func makeRepo() throws -> (GKRepository, URL) {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitkit-statcache-test-\(UUID().uuidString)")
+        let repo = try GKRepository.GKInitRepository(at: tempDir)
+        return (repo, tempDir)
+    }
+
+    private func write(_ contents: String, to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Backdates a file's modification time so it predates the next index write,
+    /// taking it out of the "racily clean" window for deterministic fast-path tests.
+    private func backdate(_ url: URL, secondsAgo: TimeInterval = 10) throws {
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(-secondsAgo)],
+            ofItemAtPath: url.path)
+    }
+
+    private func commitAll(_ repo: GKRepository) throws -> GKObjectID {
+        let author = GKSignature(name: "Test", email: "test@test.com")
+        return try repo.GKCreateCommit(message: "c", author: author)
+    }
+
+    // 5.1
+    @Test func statRoundTripsThroughIndex() throws {
+        var index = GKIndex()
+        let oid = GKObjectID(hex: "abc1234567890abcdef1234567890abcdef12345")!
+        let stat = GKFileStat(
+            ctimeSeconds: 111, ctimeNanoseconds: 222,
+            mtimeSeconds: 333, mtimeNanoseconds: 444,
+            dev: 5, ino: 6, uid: 7, gid: 8, fileSize: 99)
+        try index.add(path: "test.txt", oid: oid, mode: .regular, stat: stat)
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitkit-index-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let indexURL = tempDir.appendingPathComponent("index")
+        try index.write(to: indexURL)
+
+        let parsed = try GKIndex(from: indexURL)
+        #expect(parsed.entries.count == 1)
+        #expect(parsed.entries[0].stat == stat)
+    }
+
+    // 5.2
+    @Test func statusSkipsUnchangedFile() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let file = dir.appendingPathComponent("a.txt")
+        try write("hello", to: file)
+        try backdate(file)
+        try repo.GKAdd(path: "a.txt")
+        _ = try commitAll(repo)
+
+        let status = try repo.status()
+        #expect(!status.unstaged.contains { $0.path == "a.txt" })
+        #expect(status.isClean)
+    }
+
+    // 5.3
+    @Test func statusDetectsModifiedContent() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let file = dir.appendingPathComponent("a.txt")
+        try write("hello", to: file)
+        try backdate(file)
+        try repo.GKAdd(path: "a.txt")
+        _ = try commitAll(repo)
+
+        try write("changed", to: file)
+        let status = try repo.status()
+        #expect(status.unstaged.contains { $0.path == "a.txt" })
+    }
+
+    // 5.4
+    @Test func statusUnmodifiedWhenStatDiffersButContentIdentical() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let file = dir.appendingPathComponent("a.txt")
+        try write("hello", to: file)
+        try backdate(file)
+        try repo.GKAdd(path: "a.txt")
+        _ = try commitAll(repo)
+
+        // Rewrite identical content — changes mtime so stat no longer matches,
+        // forcing a content check that must conclude "unmodified".
+        try write("hello", to: file)
+        let status = try repo.status()
+        #expect(!status.unstaged.contains { $0.path == "a.txt" })
+    }
+
+    // 5.5
+    @Test func mixedResetMarksCleanOrModifiedByContent() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let file = dir.appendingPathComponent("a.txt")
+        try write("v1", to: file)
+        try backdate(file)
+        try repo.GKAdd(path: "a.txt")
+        let commitOID = try commitAll(repo)
+
+        // Identical content: reset --mixed leaves the file clean.
+        try backdate(file)
+        try repo.GKReset(to: commitOID, mode: .mixed)
+        #expect(try repo.status().unstaged.contains { $0.path == "a.txt" } == false)
+
+        // Differing content: reset --mixed to the same commit surfaces the change.
+        try write("v2", to: file)
+        try repo.GKReset(to: commitOID, mode: .mixed)
+        #expect(try repo.status().unstaged.contains { $0.path == "a.txt" })
+    }
+
+    // 5.6
+    @Test func racilyCleanEntriesAreSmudgedAndVerified() throws {
+        // Unit: an entry whose mtime is at/after the index mtime is smudged to size 0.
+        var index = GKIndex()
+        let oid = GKObjectID(hex: "abc1234567890abcdef1234567890abcdef12345")!
+        try index.add(path: "a.txt", oid: oid, mode: .regular,
+                      stat: GKFileStat(mtimeSeconds: 1000, fileSize: 42))
+        index.smudgeRacilyCleanEntries(indexMtimeSeconds: 1000)
+        #expect(index.entries[0].stat.fileSize == 0)
+
+        // An older entry is left untouched.
+        var index2 = GKIndex()
+        try index2.add(path: "b.txt", oid: oid, mode: .regular,
+                       stat: GKFileStat(mtimeSeconds: 500, fileSize: 42))
+        index2.smudgeRacilyCleanEntries(indexMtimeSeconds: 1000)
+        #expect(index2.entries[0].stat.fileSize == 42)
+
+        // Integration: a same-tick modification (file not backdated, so racy) is
+        // still detected, and an unmodified racy file stays clean.
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let file = dir.appendingPathComponent("a.txt")
+        try write("aaaa", to: file)
+        try repo.GKAdd(path: "a.txt") // staged "now" → racily clean
+        _ = try commitAll(repo)
+
+        // Equal-length content change; only content verification can catch it.
+        try write("bbbb", to: file)
+        #expect(try repo.status().unstaged.contains { $0.path == "a.txt" })
+    }
+}
+
 // MARK: - Packfile Test Helpers
 
 /// Builders for constructing packfiles (including delta entries) used by the

@@ -145,6 +145,8 @@ if status.isClean {
 }
 ```
 
+`status()` uses the index's cached filesystem stat metadata (size, mtime, ctime, inode, device) to skip re-hashing files whose stat is unchanged, so it stays fast on large working trees. Files touched within the same timestamp tick as the last index write are treated as "racily clean" and verified by content, so results remain correct even when stat alone cannot be trusted.
+
 ## Log
 
 ```swift

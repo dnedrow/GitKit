@@ -218,9 +218,9 @@ enum GKDiffEngine {
 
     private static func groupIntoHunks(diffLines: [GKDiffLine], contextLines: Int) -> [GKDiffHunk] {
         // Simple: one big hunk for now
-        var oldStart = 1
+        let oldStart = 1
         var oldCount = 0
-        var newStart = 1
+        let newStart = 1
         var newCount = 0
 
         for line in diffLines {

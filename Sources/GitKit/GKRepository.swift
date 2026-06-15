@@ -317,6 +317,13 @@ public final class GKRepository: GKRepositoryProtocol {
         if !isBare {
             let fm = FileManager.default
             let ignore = ignoreMatcher()
+
+            // Index entries keyed by path for O(1) lookup, plus the index file's
+            // own mtime for racy-clean detection.
+            var entryByPath = [String: GKIndexEntry](minimumCapacity: index.entries.count)
+            for entry in index.entries { entryByPath[entry.path] = entry }
+            let indexMtimeSeconds = GKFileStat.read(at: gitDir.appendingPathComponent("index"))?.mtimeSeconds ?? 0
+
             if let enumerator = fm.enumerator(at: workDir, includingPropertiesForKeys: [.isRegularFileKey],
                                                options: [.skipsHiddenFiles]) {
                 while let fileURL = enumerator.nextObject() as? URL {
@@ -327,18 +334,28 @@ public final class GKRepository: GKRepositoryProtocol {
                     fm.fileExists(atPath: fileURL.path, isDirectory: &isDir)
                     if isDir.boolValue { continue }
 
-                    if !indexPaths.contains(relativePath) {
+                    guard let indexEntry = entryByPath[relativePath] else {
                         // Exclude ignored, untracked files from the untracked set.
                         if ignore.isIgnored(path: relativePath) { continue }
                         untracked.append(relativePath)
-                    } else {
-                        // Check if modified
-                        if let data = fm.contents(atPath: fileURL.path) {
-                            let currentOID = GKRawObject.computeOID(type: .blob, data: data)
-                            if let indexEntry = index.entries.first(where: { $0.path == relativePath }),
-                               indexEntry.oid != currentOID {
-                                unstaged.append(GKStatusEntry(path: relativePath, status: .modified))
-                            }
+                        continue
+                    }
+
+                    // Fast path: if the working file's stat matches the cached
+                    // stat and the entry is not racily clean, skip hashing.
+                    if !indexEntry.stat.isEmpty,
+                       !indexEntry.stat.isRacyClean(indexMtimeSeconds: indexMtimeSeconds),
+                       let currentStat = GKFileStat.read(at: fileURL),
+                       indexEntry.stat.matchesWorkingFile(currentStat) {
+                        continue
+                    }
+
+                    // Slow path: stat differs, is empty, or is racily clean —
+                    // verify by content and report modified only if the OID differs.
+                    if let data = fm.contents(atPath: fileURL.path) {
+                        let currentOID = GKRawObject.computeOID(type: .blob, data: data)
+                        if indexEntry.oid != currentOID {
+                            unstaged.append(GKStatusEntry(path: relativePath, status: .modified))
                         }
                     }
                 }
@@ -389,6 +406,11 @@ public final class GKRepository: GKRepositoryProtocol {
     /// Writes the index to disk.
     public func writeIndex(_ index: GKIndex) throws {
         let indexPath = gitDir.appendingPathComponent("index")
+        // Smudge racily-clean entries relative to the index's write time so a
+        // file modified within the same timestamp tick is verified by content
+        // on the next status rather than trusted by stat.
+        var index = index
+        index.smudgeRacilyCleanEntries(indexMtimeSeconds: UInt32(truncatingIfNeeded: Int(Date().timeIntervalSince1970)))
         try index.write(to: indexPath)
     }
 

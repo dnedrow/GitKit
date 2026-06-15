@@ -38,7 +38,7 @@ extension GKRepository {
         let raw = GKRawObject(type: .blob, data: data)
         try objectDB.write(raw)
 
-        try index.add(path: path, oid: raw.oid, mode: .regular)
+        try index.add(path: path, oid: raw.oid, mode: .regular, stat: GKFileStat.read(at: fileURL) ?? .empty)
         try writeIndex(index)
     }
 
@@ -69,7 +69,7 @@ extension GKRepository {
             let data = try Data(contentsOf: child)
             let raw = GKRawObject(type: .blob, data: data)
             try objectDB.write(raw)
-            try index.add(path: relativePath, oid: raw.oid, mode: .regular)
+            try index.add(path: relativePath, oid: raw.oid, mode: .regular, stat: GKFileStat.read(at: child) ?? .empty)
         }
 
         try writeIndex(index)
@@ -238,7 +238,7 @@ extension GKRepository {
 
         // Update index
         var index = GKIndex()
-        try populateIndex(&index, from: tree, prefix: "")
+        try populateIndex(&index, from: tree, prefix: "", statFromWorkDir: true)
         try writeIndex(index)
     }
 
@@ -266,15 +266,21 @@ extension GKRepository {
         }
     }
 
-    private func populateIndex(_ index: inout GKIndex, from tree: GKTree, prefix: String) throws {
+    private func populateIndex(_ index: inout GKIndex, from tree: GKTree, prefix: String, statFromWorkDir: Bool = false) throws {
         for entry in tree.entries {
             let path = prefix.isEmpty ? entry.name : "\(prefix)/\(entry.name)"
 
             if entry.isTree {
                 let subtree = try lookupTree(oid: entry.oid)
-                try populateIndex(&index, from: subtree, prefix: path)
+                try populateIndex(&index, from: subtree, prefix: path, statFromWorkDir: statFromWorkDir)
             } else {
-                try index.add(path: path, oid: entry.oid, mode: entry.mode)
+                // Record the working-directory file's stat so a subsequent status
+                // can treat content-identical files as clean.
+                var stat = GKFileStat.empty
+                if statFromWorkDir && !isBare {
+                    stat = GKFileStat.read(at: workDir.appendingPathComponent(path)) ?? .empty
+                }
+                try index.add(path: path, oid: entry.oid, mode: entry.mode, stat: stat)
             }
         }
     }
@@ -641,7 +647,7 @@ extension GKRepository {
             let commit = try lookupCommit(oid: oid)
             let tree = try lookupTree(oid: commit.treeOID)
             var index = GKIndex()
-            try populateIndex(&index, from: tree, prefix: "")
+            try populateIndex(&index, from: tree, prefix: "", statFromWorkDir: true)
             try writeIndex(index)
 
         case .hard:

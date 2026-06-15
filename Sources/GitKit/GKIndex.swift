@@ -8,7 +8,7 @@ public protocol GKIndexProtocol {
     var entries: [GKIndexEntry] { get }
 
     /// Adds a file to the index.
-    mutating func add(path: String, oid: GKObjectID, mode: GKFileMode) throws
+    mutating func add(path: String, oid: GKObjectID, mode: GKFileMode, stat: GKFileStat) throws
 
     /// Removes a file from the index.
     mutating func remove(path: String) throws
@@ -31,44 +31,20 @@ public struct GKIndexEntry: Sendable, Equatable, Comparable {
     public let oid: GKObjectID
     public let path: String
     public let flags: GKIndexEntryFlags
-    public let ctimeSeconds: UInt32
-    public let ctimeNanoseconds: UInt32
-    public let mtimeSeconds: UInt32
-    public let mtimeNanoseconds: UInt32
-    public let dev: UInt32
-    public let ino: UInt32
-    public let uid: UInt32
-    public let gid: UInt32
-    public let fileSize: UInt32
+    public var stat: GKFileStat
 
     public init(
         mode: GKFileMode,
         oid: GKObjectID,
         path: String,
         flags: GKIndexEntryFlags = GKIndexEntryFlags(),
-        ctimeSeconds: UInt32 = 0,
-        ctimeNanoseconds: UInt32 = 0,
-        mtimeSeconds: UInt32 = 0,
-        mtimeNanoseconds: UInt32 = 0,
-        dev: UInt32 = 0,
-        ino: UInt32 = 0,
-        uid: UInt32 = 0,
-        gid: UInt32 = 0,
-        fileSize: UInt32 = 0
+        stat: GKFileStat = .empty
     ) {
         self.mode = mode
         self.oid = oid
         self.path = path
         self.flags = flags
-        self.ctimeSeconds = ctimeSeconds
-        self.ctimeNanoseconds = ctimeNanoseconds
-        self.mtimeSeconds = mtimeSeconds
-        self.mtimeNanoseconds = mtimeNanoseconds
-        self.dev = dev
-        self.ino = ino
-        self.uid = uid
-        self.gid = gid
-        self.fileSize = fileSize
+        self.stat = stat
     }
 
     public static func < (lhs: GKIndexEntry, rhs: GKIndexEntry) -> Bool {
@@ -209,30 +185,43 @@ public struct GKIndex: GKIndexProtocol {
 
             entries.append(GKIndexEntry(
                 mode: mode, oid: oid, path: path, flags: flags,
-                ctimeSeconds: ctimeS, ctimeNanoseconds: ctimeN,
-                mtimeSeconds: mtimeS, mtimeNanoseconds: mtimeN,
-                dev: dev, ino: ino, uid: uid, gid: gid, fileSize: size
+                stat: GKFileStat(
+                    ctimeSeconds: ctimeS, ctimeNanoseconds: ctimeN,
+                    mtimeSeconds: mtimeS, mtimeNanoseconds: mtimeN,
+                    dev: dev, ino: ino, uid: uid, gid: gid, fileSize: size
+                )
             ))
         }
 
         self.entries = entries.sorted()
     }
 
-    public mutating func add(path: String, oid: GKObjectID, mode: GKFileMode) throws {
+    public mutating func add(path: String, oid: GKObjectID, mode: GKFileMode, stat: GKFileStat = .empty) throws {
         // Remove existing entry with same path and stage 0
         entries.removeAll { $0.path == path && $0.flags.stage == 0 }
 
         let flags = GKIndexEntryFlags(nameLength: UInt16(min(path.utf8.count, 0xFFF)))
-        let now = Date()
-        let timestamp = UInt32(now.timeIntervalSince1970)
 
         let entry = GKIndexEntry(
-            mode: mode, oid: oid, path: path, flags: flags,
-            ctimeSeconds: timestamp, ctimeNanoseconds: 0,
-            mtimeSeconds: timestamp, mtimeNanoseconds: 0
+            mode: mode, oid: oid, path: path, flags: flags, stat: stat
         )
         entries.append(entry)
         entries.sort()
+    }
+
+    /// Marks "racily clean" entries so a subsequent status verifies them by
+    /// content. Any entry whose cached mtime is at or after the index file's own
+    /// mtime could have been modified within the same timestamp tick; its cached
+    /// file size is zeroed ("smudged") so it never matches a real file on disk.
+    ///
+    /// - Parameter indexMtimeSeconds: The mtime (seconds) the index file has (or
+    ///   will have) on disk.
+    public mutating func smudgeRacilyCleanEntries(indexMtimeSeconds: UInt32) {
+        for i in entries.indices where !entries[i].stat.isEmpty {
+            if entries[i].stat.isRacyClean(indexMtimeSeconds: indexMtimeSeconds) {
+                entries[i].stat.fileSize = 0
+            }
+        }
     }
 
     public mutating func remove(path: String) throws {
@@ -258,16 +247,16 @@ public struct GKIndex: GKIndexProtocol {
         // Entries
         for entry in entries {
             let entryStart = data.count
-            Self.appendUInt32(&data, entry.ctimeSeconds)
-            Self.appendUInt32(&data, entry.ctimeNanoseconds)
-            Self.appendUInt32(&data, entry.mtimeSeconds)
-            Self.appendUInt32(&data, entry.mtimeNanoseconds)
-            Self.appendUInt32(&data, entry.dev)
-            Self.appendUInt32(&data, entry.ino)
+            Self.appendUInt32(&data, entry.stat.ctimeSeconds)
+            Self.appendUInt32(&data, entry.stat.ctimeNanoseconds)
+            Self.appendUInt32(&data, entry.stat.mtimeSeconds)
+            Self.appendUInt32(&data, entry.stat.mtimeNanoseconds)
+            Self.appendUInt32(&data, entry.stat.dev)
+            Self.appendUInt32(&data, entry.stat.ino)
             Self.appendUInt32(&data, entry.mode.octal)
-            Self.appendUInt32(&data, entry.uid)
-            Self.appendUInt32(&data, entry.gid)
-            Self.appendUInt32(&data, entry.fileSize)
+            Self.appendUInt32(&data, entry.stat.uid)
+            Self.appendUInt32(&data, entry.stat.gid)
+            Self.appendUInt32(&data, entry.stat.fileSize)
             data.append(contentsOf: entry.oid.bytes)
 
             let flagValue = entry.flags.packed
