@@ -121,9 +121,9 @@ public struct GKConfiguration: GKConfigurationProtocol {
 
         let expanded: String
         if raw == "~" {
-            expanded = FileManager.default.homeDirectoryForCurrentUser.path
+            expanded = URL(fileURLWithPath: NSHomeDirectory()).path
         } else if raw.hasPrefix("~/") {
-            expanded = FileManager.default.homeDirectoryForCurrentUser
+            expanded = URL(fileURLWithPath: NSHomeDirectory())
                 .appendingPathComponent(String(raw.dropFirst(2))).path
         } else {
             expanded = (raw as NSString).expandingTildeInPath
