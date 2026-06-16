@@ -5,11 +5,23 @@ import Foundation
 /// Pure Swift zlib compression and decompression.
 /// Git stores objects using zlib (deflate) compression.
 enum GKZlib {
+    /// Absolute upper bound on the number of bytes a single inflate operation
+    /// may produce when the caller does not know the size in advance (e.g. loose
+    /// objects, whose size lives inside the decompressed stream). This caps the
+    /// blast radius of a decompression bomb — a tiny compressed input that would
+    /// otherwise expand to many gigabytes — while remaining generous enough for
+    /// realistic object sizes.
+    static let defaultMaxOutputSize = 1 << 30 // 1 GiB
+
     /// Decompresses zlib-compressed data.
-    /// - Parameter data: Zlib-compressed data (with 2-byte header).
+    /// - Parameters:
+    ///   - data: Zlib-compressed data (with 2-byte header).
+    ///   - maxOutputSize: The maximum number of decompressed bytes to allow
+    ///     before throwing. Defaults to ``defaultMaxOutputSize``.
     /// - Returns: The decompressed data.
-    /// - Throws: `GKError.zlibError` if decompression fails.
-    static func decompress(_ data: Data) throws -> Data {
+    /// - Throws: `GKError.zlibError` if decompression fails or the output would
+    ///   exceed `maxOutputSize`.
+    static func decompress(_ data: Data, maxOutputSize: Int = GKZlib.defaultMaxOutputSize) throws -> Data {
         // Verify zlib header
         guard data.count >= 6 else {
             throw GKError.zlibError("Data too short for zlib format")
@@ -29,7 +41,7 @@ enum GKZlib {
 
         // Skip 2-byte zlib header, inflate the deflate stream
         let deflateData = data.dropFirst(2)
-        return try inflate(Array(deflateData))
+        return try inflate(Array(deflateData), maxOutputSize: maxOutputSize)
     }
 
     /// Decompresses a raw deflate stream (no zlib header) and returns
@@ -38,9 +50,15 @@ enum GKZlib {
     /// - Parameters:
     ///   - bytes: The buffer containing the deflate stream.
     ///   - start: The byte index within `bytes` where the deflate stream begins.
-    static func inflateRaw(_ bytes: [UInt8], from start: Int = 0) throws -> (data: Data, bytesRead: Int) {
+    ///   - maxOutputSize: The maximum number of decompressed bytes to allow
+    ///     before throwing. Defaults to ``defaultMaxOutputSize``.
+    static func inflateRaw(
+        _ bytes: [UInt8],
+        from start: Int = 0,
+        maxOutputSize: Int = GKZlib.defaultMaxOutputSize
+    ) throws -> (data: Data, bytesRead: Int) {
         var reader = BitReader(data: bytes, start: start)
-        let output = try inflateStream(reader: &reader)
+        let output = try inflateStream(reader: &reader, maxOutputSize: maxOutputSize)
         return (output, reader.totalBytesConsumed)
     }
 
@@ -56,8 +74,16 @@ enum GKZlib {
     ///   - start: The byte index within `bytes` where the zlib header begins.
     ///     Passing an offset avoids copying the buffer when reading a single
     ///     entry from the middle of a packfile.
+    ///   - maxOutputSize: The maximum number of decompressed bytes to allow
+    ///     before throwing. Packfile callers pass the entry's declared size so a
+    ///     lying header cannot expand without bound. Defaults to
+    ///     ``defaultMaxOutputSize``.
     /// - Returns: The decompressed data and the total compressed bytes consumed.
-    static func inflateZlibStream(_ bytes: [UInt8], from start: Int = 0) throws -> (data: Data, bytesRead: Int) {
+    static func inflateZlibStream(
+        _ bytes: [UInt8],
+        from start: Int = 0,
+        maxOutputSize: Int = GKZlib.defaultMaxOutputSize
+    ) throws -> (data: Data, bytesRead: Int) {
         guard bytes.count - start >= 2 else {
             throw GKError.zlibError("Data too short for zlib header")
         }
@@ -74,7 +100,7 @@ enum GKZlib {
         }
 
         // Inflate the deflate body that follows the 2-byte header.
-        let (output, deflateBytes) = try inflateRaw(bytes, from: start + 2)
+        let (output, deflateBytes) = try inflateRaw(bytes, from: start + 2, maxOutputSize: maxOutputSize)
 
         // header (2) + deflate body + Adler-32 trailer (4)
         let total = 2 + deflateBytes + 4
@@ -140,12 +166,12 @@ enum GKZlib {
 
     // MARK: - Inflate (Deflate Decompression)
 
-    private static func inflate(_ bytes: [UInt8]) throws -> Data {
+    private static func inflate(_ bytes: [UInt8], maxOutputSize: Int = GKZlib.defaultMaxOutputSize) throws -> Data {
         var reader = BitReader(data: bytes)
-        return try inflateStream(reader: &reader)
+        return try inflateStream(reader: &reader, maxOutputSize: maxOutputSize)
     }
 
-    private static func inflateStream(reader: inout BitReader) throws -> Data {
+    private static func inflateStream(reader: inout BitReader, maxOutputSize: Int = GKZlib.defaultMaxOutputSize) throws -> Data {
         var output = Data()
 
         var isFinal = false
@@ -159,6 +185,9 @@ enum GKZlib {
                 reader.alignToByte()
                 let len = try reader.readUInt16LE()
                 _ = try reader.readUInt16LE() // NLEN
+                guard output.count + Int(len) <= maxOutputSize else {
+                    throw GKError.zlibError("Decompressed output exceeds maximum of \(maxOutputSize) bytes")
+                }
                 let blockData = try reader.readBytes(Int(len))
                 output.append(contentsOf: blockData)
 
@@ -166,13 +195,15 @@ enum GKZlib {
                 // Fixed Huffman codes
                 try inflateHuffmanBlock(reader: &reader, output: &output,
                                         litLenTree: HuffmanTree.fixedLitLen,
-                                        distTree: HuffmanTree.fixedDist)
+                                        distTree: HuffmanTree.fixedDist,
+                                        maxOutputSize: maxOutputSize)
 
             case 2:
                 // Dynamic Huffman codes
                 let (litLenTree, distTree) = try decodeDynamicTrees(reader: &reader)
                 try inflateHuffmanBlock(reader: &reader, output: &output,
-                                        litLenTree: litLenTree, distTree: distTree)
+                                        litLenTree: litLenTree, distTree: distTree,
+                                        maxOutputSize: maxOutputSize)
 
             default:
                 throw GKError.zlibError("Invalid deflate block type: \(blockType)")
@@ -186,7 +217,8 @@ enum GKZlib {
         reader: inout BitReader,
         output: inout Data,
         litLenTree: HuffmanTree,
-        distTree: HuffmanTree
+        distTree: HuffmanTree,
+        maxOutputSize: Int = GKZlib.defaultMaxOutputSize
     ) throws {
         while true {
             let symbol = try litLenTree.decode(reader: &reader)
@@ -194,12 +226,19 @@ enum GKZlib {
             if symbol == 256 {
                 break // End of block
             } else if symbol < 256 {
+                guard output.count + 1 <= maxOutputSize else {
+                    throw GKError.zlibError("Decompressed output exceeds maximum of \(maxOutputSize) bytes")
+                }
                 output.append(UInt8(symbol))
             } else {
                 // Length/distance pair
                 let length = try decodeLength(symbol: symbol, reader: &reader)
                 let distSymbol = try distTree.decode(reader: &reader)
                 let distance = try decodeDistance(symbol: distSymbol, reader: &reader)
+
+                guard output.count + length <= maxOutputSize else {
+                    throw GKError.zlibError("Decompressed output exceeds maximum of \(maxOutputSize) bytes")
+                }
 
                 // Copy from back-reference (byte-by-byte for overlapping copies)
                 let startIdx = output.count - distance

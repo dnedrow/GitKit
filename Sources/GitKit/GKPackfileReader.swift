@@ -73,6 +73,38 @@ enum GKPackfileReader {
         let bodyEnd = bytes.count - 20
 
         // First pass: split the body into raw entries, recording each offset.
+        let (entries, entryByOffset) = try parseRawEntries(
+            bytes, objectCount: objectCount, bodyEnd: bodyEnd)
+
+        // Second pass: materialize every entry, resolving deltas on demand.
+        var resolvedByOffset = [Int: GKRawObject]()
+        var resolvedByOID = [GKObjectID: GKRawObject]()
+        var results = [GKRawObject]()
+        results.reserveCapacity(entries.count)
+
+        for entry in entries {
+            let object = try materialize(
+                entry,
+                entries: entries,
+                entryByOffset: entryByOffset,
+                resolvedByOffset: &resolvedByOffset,
+                resolvedByOID: &resolvedByOID,
+                baseLookup: baseLookup
+            )
+            results.append(object)
+        }
+
+        return results
+    }
+
+    /// First pass of `parse`: splits the pack body into raw entries, decompressing
+    /// each payload (capped at its declared size) and recording every entry's
+    /// pack offset so deltas can be resolved in the second pass.
+    private static func parseRawEntries(
+        _ bytes: [UInt8],
+        objectCount: Int,
+        bodyEnd: Int
+    ) throws -> (entries: [RawEntry], entryByOffset: [Int: Int]) {
         var entries = [RawEntry]()
         entries.reserveCapacity(objectCount)
         var entryByOffset = [Int: Int]() // pack offset -> index in `entries`
@@ -108,8 +140,9 @@ enum GKPackfileReader {
                 break
             }
 
-            // Decompress the zlib stream that forms this entry's payload.
-            let (payload, consumed) = try GKZlib.inflateZlibStream(bytes, from: offset)
+            // Decompress the entry payload, capping inflation at the declared
+            // size to prevent a decompression-bomb expansion.
+            let (payload, consumed) = try GKZlib.inflateZlibStream(bytes, from: offset, maxOutputSize: size)
             guard payload.count == size else {
                 throw GKError.packfileError(
                     "Entry size mismatch: header \(size), inflated \(payload.count)")
@@ -126,25 +159,7 @@ enum GKPackfileReader {
             ))
         }
 
-        // Second pass: materialize every entry, resolving deltas on demand.
-        var resolvedByOffset = [Int: GKRawObject]()
-        var resolvedByOID = [GKObjectID: GKRawObject]()
-        var results = [GKRawObject]()
-        results.reserveCapacity(entries.count)
-
-        for entry in entries {
-            let object = try materialize(
-                entry,
-                entries: entries,
-                entryByOffset: entryByOffset,
-                resolvedByOffset: &resolvedByOffset,
-                resolvedByOID: &resolvedByOID,
-                baseLookup: baseLookup
-            )
-            results.append(object)
-        }
-
-        return results
+        return (entries, entryByOffset)
     }
 
     // MARK: - Single-Object Reading
@@ -237,7 +252,7 @@ enum GKPackfileReader {
             break
         }
 
-        let (payload, _) = try GKZlib.inflateZlibStream(bytes, from: offset)
+        let (payload, _) = try GKZlib.inflateZlibStream(bytes, from: offset, maxOutputSize: size)
         guard payload.count == size else {
             throw GKError.packfileError(
                 "Entry size mismatch: header \(size), inflated \(payload.count)")

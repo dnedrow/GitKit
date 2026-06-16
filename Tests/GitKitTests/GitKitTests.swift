@@ -1511,3 +1511,39 @@ struct GKConfigurationSecurityTests {
         #expect(reread.getString("core.special") == value)
     }
 }
+
+// MARK: - Zlib Decompression-Bomb Tests
+
+@Suite("GKZlibSecurity")
+struct GKZlibSecurityTests {
+    /// Decompression must stop and throw once the output would exceed the
+    /// supplied maximum, rather than expanding without bound.
+    @Test func decompressRejectsOutputBeyondCap() throws {
+        // 100 KiB of zeros compresses to a tiny stream but expands hugely —
+        // a classic decompression bomb in miniature.
+        let original = Data(repeating: 0, count: 100 * 1024)
+        let compressed = try GKZlib.compress(original)
+
+        #expect(throws: GKError.self) {
+            _ = try GKZlib.decompress(compressed, maxOutputSize: 1024)
+        }
+    }
+
+    /// Decompression within the cap succeeds and round-trips exactly.
+    @Test func decompressWithinCapSucceeds() throws {
+        let original = Data("the quick brown fox".utf8)
+        let compressed = try GKZlib.compress(original)
+
+        let result = try GKZlib.decompress(compressed, maxOutputSize: 1024)
+        #expect(result == original)
+    }
+
+    /// The cap boundary is inclusive: output exactly equal to the cap is allowed.
+    @Test func decompressAtExactCapSucceeds() throws {
+        let original = Data(repeating: 0x41, count: 256)
+        let compressed = try GKZlib.compress(original)
+
+        let result = try GKZlib.decompress(compressed, maxOutputSize: 256)
+        #expect(result == original)
+    }
+}
