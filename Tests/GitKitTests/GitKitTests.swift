@@ -1547,3 +1547,39 @@ struct GKZlibSecurityTests {
         #expect(result == original)
     }
 }
+
+// MARK: - Packfile Allocation-Bomb Tests
+
+@Suite("GKPackfileSecurity")
+struct GKPackfileSecurityTests {
+    /// A pack header that claims a huge object count but carries no body must
+    /// fail gracefully (throwing) rather than attempting a multi-gigabyte
+    /// `reserveCapacity` allocation.
+    @Test func forgedObjectCountDoesNotOverAllocate() throws {
+        var bytes: [UInt8] = []
+        bytes += [0x50, 0x41, 0x43, 0x4B]       // "PACK"
+        bytes += [0x00, 0x00, 0x00, 0x02]       // version 2
+        bytes += [0xFF, 0xFF, 0xFF, 0xFF]       // object count = 4,294,967,295
+        // No entry body.
+        let trailer = GKSHA1.hash(Data(bytes))  // valid trailing checksum
+        bytes += trailer
+
+        #expect(throws: GKError.self) {
+            _ = try GKPackfileReader.parse(Data(bytes))
+        }
+    }
+
+    /// The clamp must not break a legitimate, well-formed empty pack
+    /// (object count of zero parses to no objects).
+    @Test func emptyPackParsesToNoObjects() throws {
+        var bytes: [UInt8] = []
+        bytes += [0x50, 0x41, 0x43, 0x4B]       // "PACK"
+        bytes += [0x00, 0x00, 0x00, 0x02]       // version 2
+        bytes += [0x00, 0x00, 0x00, 0x00]       // object count = 0
+        let trailer = GKSHA1.hash(Data(bytes))
+        bytes += trailer
+
+        let objects = try GKPackfileReader.parse(Data(bytes))
+        #expect(objects.isEmpty)
+    }
+}

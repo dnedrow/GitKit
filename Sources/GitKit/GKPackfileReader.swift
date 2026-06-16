@@ -106,7 +106,14 @@ enum GKPackfileReader {
         bodyEnd: Int
     ) throws -> (entries: [RawEntry], entryByOffset: [Int: Int]) {
         var entries = [RawEntry]()
-        entries.reserveCapacity(objectCount)
+        // `objectCount` comes from the (untrusted) pack header. Clamp the up-front
+        // reservation to the number of entries the body could physically hold —
+        // each entry occupies at least one byte — so a forged count cannot
+        // trigger a multi-gigabyte allocation. `reserveCapacity` is only a hint;
+        // the loop still appends exactly `objectCount` entries (or throws on a
+        // short body), so correctness is unaffected.
+        let bodyByteCount = max(0, bodyEnd - 12)
+        entries.reserveCapacity(clampedReserve(objectCount, limit: bodyByteCount))
         var entryByOffset = [Int: Int]() // pack offset -> index in `entries`
 
         var offset = 12
@@ -390,7 +397,11 @@ enum GKPackfileReader {
         pos += resultConsumed
 
         var output = [UInt8]()
-        output.reserveCapacity(resultSize)
+        // `resultSize` is taken from the (untrusted) delta header. Clamp the
+        // up-front reservation to an absolute ceiling so a forged size cannot
+        // request a multi-gigabyte allocation; the actual output is still bounded
+        // by the delta instructions and validated against `resultSize` below.
+        output.reserveCapacity(clampedReserve(resultSize, limit: GKZlib.defaultMaxOutputSize))
 
         while pos < d.count {
             let opcode = d[pos]
@@ -491,6 +502,14 @@ enum GKPackfileReader {
     }
 
     // MARK: - Helpers
+
+    /// Clamps an attacker-supplied count used for `reserveCapacity` so a forged
+    /// header cannot trigger a huge up-front allocation. Returns the smaller of
+    /// the requested count and `limit`, never negative.
+    private static func clampedReserve(_ requested: Int, limit: Int) -> Int {
+        guard requested > 0 else { return 0 }
+        return min(requested, max(0, limit))
+    }
 
     private static func readUInt32BE(_ bytes: [UInt8], at offset: Int) -> UInt32 {
         UInt32(bytes[offset]) << 24 | UInt32(bytes[offset + 1]) << 16 |
