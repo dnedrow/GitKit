@@ -1235,3 +1235,183 @@ struct GKLooseObjectDatabasePackTests {
         #expect(second.data == blob.data)
     }
 }
+
+// MARK: - Path & Reference Name Validation Tests
+
+@Suite("GKPathValidation")
+struct GKPathValidationTests {
+    // MARK: Tree entry names
+
+    @Test func acceptsOrdinaryNames() throws {
+        try GKPathValidation.validateTreeEntryName("README.md")
+        try GKPathValidation.validateTreeEntryName("src")
+        try GKPathValidation.validateTreeEntryName(".gitignore")
+        try GKPathValidation.validateTreeEntryName("file with spaces.txt")
+    }
+
+    @Test func rejectsTraversalNames() {
+        for name in ["..", ".", "", "../etc", "a/b", "a\\b"] {
+            #expect(throws: GKError.self) {
+                try GKPathValidation.validateTreeEntryName(name)
+            }
+        }
+    }
+
+    @Test func rejectsNulByte() {
+        #expect(throws: GKError.self) {
+            try GKPathValidation.validateTreeEntryName("a\0b")
+        }
+    }
+
+    @Test func rejectsDotGitSpellings() {
+        for name in [".git", ".GIT", ".Git", ".git.", ".git ", "git~1", "GIT~1"] {
+            #expect(throws: GKError.self) {
+                try GKPathValidation.validateTreeEntryName(name)
+            }
+        }
+    }
+
+    // MARK: Containment
+
+    @Test func containmentAcceptsInsidePaths() throws {
+        let base = URL(fileURLWithPath: "/tmp/repo")
+        try GKPathValidation.ensureContained(base.appendingPathComponent("a/b.txt"), within: base)
+        try GKPathValidation.ensureContained(base, within: base)
+    }
+
+    @Test func containmentRejectsEscapingPaths() {
+        let base = URL(fileURLWithPath: "/tmp/repo")
+        #expect(throws: GKError.self) {
+            try GKPathValidation.ensureContained(
+                base.appendingPathComponent("../evil.txt"), within: base)
+        }
+        // A sibling directory sharing a prefix must not be considered inside.
+        #expect(throws: GKError.self) {
+            try GKPathValidation.ensureContained(
+                URL(fileURLWithPath: "/tmp/repo-evil/x"), within: base)
+        }
+    }
+
+    // MARK: Reference names
+
+    @Test func acceptsValidReferenceNames() throws {
+        try GKPathValidation.validateReferenceName("refs/heads/main")
+        try GKPathValidation.validateReferenceName("refs/remotes/origin/feature/login")
+        try GKPathValidation.validateReferenceName("refs/tags/v1.0.0")
+        try GKPathValidation.validateReferenceName("refs/stash")
+    }
+
+    @Test func rejectsTraversalReferenceNames() {
+        for name in [
+            "refs/heads/../../evil",
+            "../escape",
+            "refs/heads/main.lock",
+            "refs/heads/.hidden",
+            "refs//heads/main",
+            "/refs/heads/main",
+            "refs/heads/main/",
+            "refs/heads/foo^bar",
+            "refs/heads/foo bar",
+            "refs/heads/foo~1",
+            "refs/heads/foo:bar",
+            "",
+            "@",
+        ] {
+            #expect(throws: GKError.self) {
+                try GKPathValidation.validateReferenceName(name)
+            }
+        }
+    }
+}
+
+// MARK: - Checkout Security Tests
+
+@Suite("GKCheckoutSecurity")
+struct GKCheckoutSecurityTests {
+    /// A malicious tree whose entry name is `..` must be refused on checkout
+    /// rather than writing a blob outside the working directory.
+    @Test func checkoutRejectsTraversalTreeEntry() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitkit-traversal-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let repo = try GKRepository.GKInitRepository(at: tempDir)
+
+        // A blob whose content we would attempt to write outside the work tree.
+        let blob = GKRawObject(type: .blob, data: Data("pwned".utf8))
+        try repo.objectDB.write(blob)
+
+        // Hand-craft a tree entry named ".." pointing at the blob.
+        let evilTree = GKTree(entries: [
+            GKTreeEntry(mode: .regular, name: "..", oid: blob.oid)
+        ])
+        let rawTree = GKRawObject(type: .tree, data: evilTree.serialize())
+        try repo.objectDB.write(rawTree)
+
+        let author = GKSignature(name: "A", email: "a@b.c")
+        let commit = GKCommit(
+            treeOID: rawTree.oid,
+            parentOIDs: [],
+            author: author,
+            committer: author,
+            message: "evil"
+        )
+        let rawCommit = GKRawObject(type: .commit, data: commit.serialize())
+        try repo.objectDB.write(rawCommit)
+
+        #expect(throws: GKError.self) {
+            try repo.GKCheckout(commit: rawCommit.oid)
+        }
+
+        // Ensure nothing was written to the parent directory.
+        let escaped = tempDir.deletingLastPathComponent().appendingPathComponent("..")
+        _ = escaped // path traversal target would have been the parent dir
+        #expect(!FileManager.default.fileExists(
+            atPath: tempDir.deletingLastPathComponent().path + "/pwned"))
+    }
+
+    /// A tree entry named `.git` must be refused so the repository metadata
+    /// cannot be overwritten during checkout.
+    @Test func checkoutRejectsDotGitTreeEntry() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitkit-dotgit-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let repo = try GKRepository.GKInitRepository(at: tempDir)
+
+        let blob = GKRawObject(type: .blob, data: Data("hook".utf8))
+        try repo.objectDB.write(blob)
+        let evilTree = GKTree(entries: [
+            GKTreeEntry(mode: .regular, name: ".git", oid: blob.oid)
+        ])
+        let rawTree = GKRawObject(type: .tree, data: evilTree.serialize())
+        try repo.objectDB.write(rawTree)
+
+        let author = GKSignature(name: "A", email: "a@b.c")
+        let commit = GKCommit(
+            treeOID: rawTree.oid, parentOIDs: [], author: author,
+            committer: author, message: "evil")
+        let rawCommit = GKRawObject(type: .commit, data: commit.serialize())
+        try repo.objectDB.write(rawCommit)
+
+        #expect(throws: GKError.self) {
+            try repo.GKCheckout(commit: rawCommit.oid)
+        }
+    }
+
+    /// Writing a reference whose name escapes `.git` must be refused.
+    @Test func referenceWriteRejectsTraversalName() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitkit-refname-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let repo = try GKRepository.GKInitRepository(at: tempDir)
+        let evilRef = GKReference(
+            name: "../../../../tmp/gitkit-escaped-\(UUID().uuidString)",
+            target: .direct(.zero))
+
+        #expect(throws: GKError.self) {
+            try repo.refStorage.write(evilRef)
+        }
+    }
+}

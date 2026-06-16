@@ -76,7 +76,11 @@ final class GKFileReferenceStorage: GKReferenceStorage {
     }
 
     func write(_ reference: GKReference) throws {
+        // Reference names may originate from remote ref advertisements; validate
+        // before joining onto gitDir to prevent writes outside `.git`.
+        try GKPathValidation.validateReferenceName(reference.name)
         let refPath = gitDir.appendingPathComponent(reference.name)
+        try GKPathValidation.ensureContained(refPath, within: gitDir)
         let dir = refPath.deletingLastPathComponent()
 
         if !FileManager.default.fileExists(atPath: dir.path) {
@@ -95,7 +99,9 @@ final class GKFileReferenceStorage: GKReferenceStorage {
     }
 
     func delete(name: String) throws {
+        try GKPathValidation.validateReferenceName(name)
         let refPath = gitDir.appendingPathComponent(name)
+        try GKPathValidation.ensureContained(refPath, within: gitDir)
         guard FileManager.default.fileExists(atPath: refPath.path) else {
             throw GKError.referenceNotFound(name)
         }

@@ -250,7 +250,12 @@ extension GKRepository {
         let fm = FileManager.default
 
         for entry in tree.entries {
+            // Reject attacker-controlled names that would escape the work tree
+            // or overwrite the `.git` directory before constructing any path.
+            try GKPathValidation.validateTreeEntryName(entry.name)
             let entryPath = path.appendingPathComponent(entry.name)
+            // Defense in depth: ensure the joined path stays inside the work tree.
+            try GKPathValidation.ensureContained(entryPath, within: workDir)
 
             if entry.isTree {
                 let subtree = try lookupTree(oid: entry.oid)
@@ -272,6 +277,9 @@ extension GKRepository {
 
     private func populateIndex(_ index: inout GKIndex, from tree: GKTree, prefix: String, statFromWorkDir: Bool = false) throws {
         for entry in tree.entries {
+            // Validate each component so a malicious tree cannot inject traversal
+            // or `.git` segments into index paths.
+            try GKPathValidation.validateTreeEntryName(entry.name)
             let path = prefix.isEmpty ? entry.name : "\(prefix)/\(entry.name)"
 
             if entry.isTree {

@@ -32,6 +32,8 @@ public enum GKError: Error, CustomStringConvertible {
     case checkoutConflict(paths: [String])
     case uncommittedChanges
     case invalidDiff(String)
+    case unsafePath(String)
+    case invalidReferenceName(String)
 
     public var description: String {
         switch self {
@@ -91,6 +93,10 @@ public enum GKError: Error, CustomStringConvertible {
             return "Uncommitted changes in working directory"
         case .invalidDiff(let msg):
             return "Invalid diff: \(msg)"
+        case .unsafePath(let msg):
+            return "Unsafe path rejected: \(msg)"
+        case .invalidReferenceName(let msg):
+            return "Invalid reference name: \(msg)"
         }
     }
 }
