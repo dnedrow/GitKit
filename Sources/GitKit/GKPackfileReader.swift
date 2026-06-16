@@ -122,7 +122,7 @@ enum GKPackfileReader {
                 throw GKError.packfileError("Unexpected end of pack body")
             }
             let entryStart = offset
-            let (typeNum, size, headerLen) = decodeEntryHeader(bytes, at: offset)
+            let (typeNum, size, headerLen) = try decodeEntryHeader(bytes, at: offset)
             offset += headerLen
 
             var baseOffset: Int?
@@ -130,7 +130,7 @@ enum GKPackfileReader {
 
             switch typeNum {
             case PackEntryType.ofsDelta:
-                let (negOffset, consumed) = decodeOffset(bytes, at: offset)
+                let (negOffset, consumed) = try decodeOffset(bytes, at: offset)
                 offset += consumed
                 let base = entryStart - negOffset
                 guard base >= 0 else {
@@ -238,7 +238,7 @@ enum GKPackfileReader {
         }
 
         var offset = start
-        let (typeNum, size, headerLen) = decodeEntryHeader(bytes, at: offset)
+        let (typeNum, size, headerLen) = try decodeEntryHeader(bytes, at: offset)
         offset += headerLen
 
         var baseOffset: Int?
@@ -246,7 +246,7 @@ enum GKPackfileReader {
 
         switch typeNum {
         case PackEntryType.ofsDelta:
-            let (negOffset, consumed) = decodeOffset(bytes, at: offset)
+            let (negOffset, consumed) = try decodeOffset(bytes, at: offset)
             offset += consumed
             baseOffset = start - negOffset
         case PackEntryType.refDelta:
@@ -386,14 +386,14 @@ enum GKPackfileReader {
         let d = [UInt8](delta)
         var pos = 0
 
-        let (baseSize, baseConsumed) = decodeDeltaSize(d, at: pos)
+        let (baseSize, baseConsumed) = try decodeDeltaSize(d, at: pos)
         pos += baseConsumed
         guard baseSize == baseBytes.count else {
             throw GKError.packfileError(
                 "Delta base size mismatch: header \(baseSize), actual \(baseBytes.count)")
         }
 
-        let (resultSize, resultConsumed) = decodeDeltaSize(d, at: pos)
+        let (resultSize, resultConsumed) = try decodeDeltaSize(d, at: pos)
         pos += resultConsumed
 
         var output = [UInt8]()
@@ -409,15 +409,17 @@ enum GKPackfileReader {
 
             if opcode & 0x80 != 0 {
                 // Copy instruction: offset and size are built from selected bytes.
+                // Each selected byte is bounds-checked so a truncated instruction
+                // throws rather than reading past the delta buffer.
                 var copyOffset = 0
                 var copySize = 0
-                if opcode & 0x01 != 0 { copyOffset |= Int(d[pos]); pos += 1 }
-                if opcode & 0x02 != 0 { copyOffset |= Int(d[pos]) << 8; pos += 1 }
-                if opcode & 0x04 != 0 { copyOffset |= Int(d[pos]) << 16; pos += 1 }
-                if opcode & 0x08 != 0 { copyOffset |= Int(d[pos]) << 24; pos += 1 }
-                if opcode & 0x10 != 0 { copySize |= Int(d[pos]); pos += 1 }
-                if opcode & 0x20 != 0 { copySize |= Int(d[pos]) << 8; pos += 1 }
-                if opcode & 0x40 != 0 { copySize |= Int(d[pos]) << 16; pos += 1 }
+                if opcode & 0x01 != 0 { copyOffset |= Int(try readByte(d, at: &pos)) }
+                if opcode & 0x02 != 0 { copyOffset |= Int(try readByte(d, at: &pos)) << 8 }
+                if opcode & 0x04 != 0 { copyOffset |= Int(try readByte(d, at: &pos)) << 16 }
+                if opcode & 0x08 != 0 { copyOffset |= Int(try readByte(d, at: &pos)) << 24 }
+                if opcode & 0x10 != 0 { copySize |= Int(try readByte(d, at: &pos)) }
+                if opcode & 0x20 != 0 { copySize |= Int(try readByte(d, at: &pos)) << 8 }
+                if opcode & 0x40 != 0 { copySize |= Int(try readByte(d, at: &pos)) << 16 }
                 // A copy size of zero means 0x10000 bytes.
                 if copySize == 0 { copySize = 0x10000 }
 
@@ -449,8 +451,12 @@ enum GKPackfileReader {
 
     /// Decodes a pack entry header: a 3-bit type plus a little-endian,
     /// 7-bits-per-byte size. Returns the type, size, and bytes consumed.
-    private static func decodeEntryHeader(_ bytes: [UInt8], at start: Int) -> (type: UInt8, size: Int, length: Int) {
+    /// - Throws: `GKError.packfileError` if the header runs past the buffer.
+    private static func decodeEntryHeader(_ bytes: [UInt8], at start: Int) throws -> (type: UInt8, size: Int, length: Int) {
         var index = start
+        guard index < bytes.count else {
+            throw GKError.packfileError("Pack entry header truncated")
+        }
         var byte = bytes[index]
         index += 1
 
@@ -459,6 +465,9 @@ enum GKPackfileReader {
         var shift = 4
 
         while byte & 0x80 != 0 {
+            guard index < bytes.count else {
+                throw GKError.packfileError("Pack entry header truncated")
+            }
             byte = bytes[index]
             index += 1
             size |= Int(byte & 0x7F) << shift
@@ -470,14 +479,21 @@ enum GKPackfileReader {
 
     /// Decodes the `OFS_DELTA` base offset (a big-endian, 7-bits-per-byte
     /// varint with the +1 carry convention). Returns the offset and bytes consumed.
-    private static func decodeOffset(_ bytes: [UInt8], at start: Int) -> (offset: Int, length: Int) {
+    /// - Throws: `GKError.packfileError` if the varint runs past the buffer.
+    private static func decodeOffset(_ bytes: [UInt8], at start: Int) throws -> (offset: Int, length: Int) {
         var index = start
+        guard index < bytes.count else {
+            throw GKError.packfileError("OFS_DELTA offset truncated")
+        }
         var byte = bytes[index]
         index += 1
         var value = Int(byte & 0x7F)
 
         while byte & 0x80 != 0 {
             value += 1
+            guard index < bytes.count else {
+                throw GKError.packfileError("OFS_DELTA offset truncated")
+            }
             byte = bytes[index]
             index += 1
             value = (value << 7) | Int(byte & 0x7F)
@@ -487,11 +503,15 @@ enum GKPackfileReader {
     }
 
     /// Decodes a delta size field (little-endian, 7-bits-per-byte varint).
-    private static func decodeDeltaSize(_ bytes: [UInt8], at start: Int) -> (size: Int, length: Int) {
+    /// - Throws: `GKError.packfileError` if the varint runs past the buffer.
+    private static func decodeDeltaSize(_ bytes: [UInt8], at start: Int) throws -> (size: Int, length: Int) {
         var index = start
         var size = 0
         var shift = 0
         while true {
+            guard index < bytes.count else {
+                throw GKError.packfileError("Delta size field truncated")
+            }
             let byte = bytes[index]
             index += 1
             size |= Int(byte & 0x7F) << shift
@@ -502,6 +522,17 @@ enum GKPackfileReader {
     }
 
     // MARK: - Helpers
+
+    /// Reads a single byte at `pos`, advancing it, and throws if `pos` is past
+    /// the end of `bytes`. Used to bounds-check delta copy/insert operands.
+    private static func readByte(_ bytes: [UInt8], at pos: inout Int) throws -> UInt8 {
+        guard pos < bytes.count else {
+            throw GKError.packfileError("Delta instruction truncated")
+        }
+        let value = bytes[pos]
+        pos += 1
+        return value
+    }
 
     /// Clamps an attacker-supplied count used for `reserveCapacity` so a forged
     /// header cannot trigger a huge up-front allocation. Returns the smaller of

@@ -1660,4 +1660,41 @@ struct GKPackfileSecurityTests {
         let objects = try GKPackfileReader.parse(Data(bytes))
         #expect(objects.isEmpty)
     }
+
+    /// A pack that declares an object but whose entry header is truncated
+    /// (a varint with the continuation bit set and no following byte) must throw
+    /// rather than reading past the buffer and trapping.
+    @Test func truncatedEntryHeaderThrows() throws {
+        var bytes: [UInt8] = []
+        bytes += [0x50, 0x41, 0x43, 0x4B]       // "PACK"
+        bytes += [0x00, 0x00, 0x00, 0x02]       // version 2
+        bytes += [0x00, 0x00, 0x00, 0x01]       // object count = 1
+        // Entry header byte with the high bit set promises another size byte
+        // that never arrives before the trailer.
+        bytes += [0x90]
+        let trailer = GKSHA1.hash(Data(bytes))
+        bytes += trailer
+
+        #expect(throws: GKError.self) {
+            _ = try GKPackfileReader.parse(Data(bytes))
+        }
+    }
+
+    /// A truncated `OFS_DELTA` base-offset varint must throw, not trap.
+    @Test func truncatedOffsetVarintThrows() throws {
+        var bytes: [UInt8] = []
+        bytes += [0x50, 0x41, 0x43, 0x4B]       // "PACK"
+        bytes += [0x00, 0x00, 0x00, 0x02]       // version 2
+        bytes += [0x00, 0x00, 0x00, 0x01]       // object count = 1
+        // Entry header: type 6 (OFS_DELTA), size 0 -> single byte 0x60.
+        bytes += [0x60]
+        // Base-offset varint with continuation bit set but no continuation byte.
+        bytes += [0x80]
+        let trailer = GKSHA1.hash(Data(bytes))
+        bytes += trailer
+
+        #expect(throws: GKError.self) {
+            _ = try GKPackfileReader.parse(Data(bytes))
+        }
+    }
 }
