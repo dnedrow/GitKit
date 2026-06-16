@@ -53,7 +53,7 @@ public struct GKTree: GKObjectProtocol, Sendable {
                 throw GKError.invalidTree("Truncated SHA-1")
             }
             let oidBytes = Array(bytes[offset..<offset + 20])
-            let oid = GKObjectID(bytes: oidBytes)
+            let oid = GKObjectID(uncheckedBytes: oidBytes)
             offset += 20
 
             guard let mode = GKFileMode(rawValue: modeStr) else {

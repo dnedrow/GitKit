@@ -157,7 +157,7 @@ public struct GKIndex: GKIndexProtocol {
             let size = Self.readUInt32(bytes, at: offset); offset += 4
 
             let oidBytes = Array(bytes[offset..<offset + 20]); offset += 20
-            let oid = GKObjectID(bytes: oidBytes)
+            let oid = GKObjectID(uncheckedBytes: oidBytes)
 
             let flagsPacked = UInt16(bytes[offset]) << 8 | UInt16(bytes[offset + 1]); offset += 2
             let flags = GKIndexEntryFlags(packed: flagsPacked)

@@ -4,7 +4,30 @@ import Foundation
 
 /// Pure Swift SHA-1 hash implementation.
 /// Used internally by GitKit to compute object IDs without external dependencies.
+///
+/// > Security: SHA-1 is no longer considered collision-resistant. The
+/// > SHAttered attack (2017) produced two distinct PDFs with the same SHA-1
+/// > digest, and the cost of crafting a chosen-prefix collision has continued
+/// > to fall. GitKit uses SHA-1 because Git's on-disk object format requires
+/// > it; however:
+/// >
+/// > - **Do not** treat OID equality as proof of authenticity. An attacker
+/// >   able to mount a chosen-prefix collision can produce a second object
+/// >   that hashes to the same OID as a legitimate one.
+/// > - GitKit verifies that retrieved object content re-hashes to the
+/// >   requested OID (see ``GKLooseObjectDatabase``). This protects against
+/// >   tampered storage that swaps OIDs but does **not** defend against a
+/// >   genuine SHA-1 collision.
+/// > - Pair OIDs with out-of-band integrity (e.g. signed commits/tags) when
+/// >   authenticity matters.
+/// > - Future support for Git's SHA-256 object format is planned and is the
+/// >   intended long-term remedy.
 enum GKSHA1 {
+    /// `false` — SHA-1 is no longer collision-resistant. Provided so callers
+    /// can document or branch on this property explicitly rather than
+    /// hard-coding the assumption.
+    static let isCollisionResistant: Bool = false
+
     /// Computes the SHA-1 hash of the given data.
     /// - Parameter data: The input data to hash.
     /// - Returns: A 20-byte SHA-1 digest.

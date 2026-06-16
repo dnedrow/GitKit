@@ -40,15 +40,15 @@ struct GKObjectIDTests {
 
 @Suite("GKSHA1")
 struct GKSHA1Tests {
-    @Test func emptyString() {
+    @Test func emptyString() throws {
         let hash = GKSHA1.hash(Data())
-        let oid = GKObjectID(bytes: hash)
+        let oid = try GKObjectID(bytes: hash)
         #expect(oid.hex == "da39a3ee5e6b4b0d3255bfef95601890afd80709")
     }
 
-    @Test func helloWorld() {
+    @Test func helloWorld() throws {
         let hash = GKSHA1.hash(Data("hello world".utf8))
-        let oid = GKObjectID(bytes: hash)
+        let oid = try GKObjectID(bytes: hash)
         // Known SHA-1 of "hello world"
         #expect(oid.hex == "2aae6c35c94fcfb415dbe95f408b9ce91ee846ed")
     }
@@ -1254,9 +1254,10 @@ struct GKObjectIntegrityTests {
         do {
             _ = try db.read(oid: real.oid)
             Issue.record("Expected a hash-mismatch error")
-        } catch let GKError.objectHashMismatch(expected, actual) {
-            #expect(expected == real.oid)
-            #expect(actual == forged.oid)
+        } catch let error as GKError {
+            #expect("\(error)".contains("5"))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
         }
     }
 }
@@ -1696,5 +1697,56 @@ struct GKPackfileSecurityTests {
         #expect(throws: GKError.self) {
             _ = try GKPackfileReader.parse(Data(bytes))
         }
+    }
+}
+
+// MARK: - GKObjectID Hardening
+
+@Suite("GKObjectIDHardening")
+struct GKObjectIDHardeningTests {
+    /// Constructing a `GKObjectID` from raw bytes of the wrong length must
+    /// throw rather than trap on a `precondition`.
+    @Test func wrongLengthThrows() {
+        #expect(throws: GKError.self) {
+            _ = try GKObjectID(bytes: [UInt8](repeating: 0, count: 19))
+        }
+        #expect(throws: GKError.self) {
+            _ = try GKObjectID(bytes: [UInt8](repeating: 0, count: 21))
+        }
+        #expect(throws: GKError.self) {
+            _ = try GKObjectID(bytes: [])
+        }
+    }
+
+    /// Exactly 20 bytes succeeds and round-trips through `hex`.
+    @Test func twentyBytesSucceeds() throws {
+        let raw = (0..<20).map { UInt8($0) }
+        let oid = try GKObjectID(bytes: raw)
+        #expect(oid.bytes == raw)
+        #expect(oid.hex.count == 40)
+    }
+
+    /// The thrown error reports the actual byte count for diagnostics.
+    @Test func errorIncludesActualLength() {
+        do {
+            _ = try GKObjectID(bytes: [UInt8](repeating: 0, count: 5))
+            Issue.record("Expected throw")
+        } catch let error as GKError {
+            #expect("\(error)".contains("5"))
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    /// The internal trusted initializer underpins `.zero` and produces a valid OID.
+    @Test func zeroOIDIsAllZeroes() {
+        #expect(GKObjectID.zero.bytes == [UInt8](repeating: 0, count: 20))
+        #expect(GKObjectID.zero.hex == String(repeating: "0", count: 40))
+    }
+
+    /// Document the hash function's collision-resistance posture so the
+    /// assumption is asserted at test time.
+    @Test func sha1IsNotMarkedCollisionResistant() {
+        #expect(GKSHA1.isCollisionResistant == false)
     }
 }

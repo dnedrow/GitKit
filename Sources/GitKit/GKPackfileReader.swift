@@ -141,7 +141,7 @@ enum GKPackfileReader {
                 guard offset + 20 <= bodyEnd else {
                     throw GKError.packfileError("REF_DELTA truncated base OID")
                 }
-                baseOID = GKObjectID(bytes: Array(bytes[offset..<offset + 20]))
+                baseOID = GKObjectID(uncheckedBytes: Array(bytes[offset..<offset + 20]))
                 offset += 20
             default:
                 break
@@ -253,7 +253,7 @@ enum GKPackfileReader {
             guard offset + 20 <= bytes.count else {
                 throw GKError.packfileError("REF_DELTA truncated base OID")
             }
-            baseOID = GKObjectID(bytes: Array(bytes[offset..<offset + 20]))
+            baseOID = GKObjectID(uncheckedBytes: Array(bytes[offset..<offset + 20]))
             offset += 20
         default:
             break

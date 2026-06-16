@@ -63,7 +63,7 @@ public struct GKRawObject: Sendable {
         let header = "\(type.rawValue) \(data.count)\0"
         let fullData = Data(header.utf8) + data
         let hash = GKSHA1.hash(fullData)
-        self.oid = GKObjectID(bytes: hash)
+        self.oid = GKObjectID(uncheckedBytes: hash)
     }
 
     /// Computes the OID for the given type and data without storing.
@@ -71,7 +71,7 @@ public struct GKRawObject: Sendable {
         let header = "\(type.rawValue) \(data.count)\0"
         let fullData = Data(header.utf8) + data
         let hash = GKSHA1.hash(fullData)
-        return GKObjectID(bytes: hash)
+        return GKObjectID(uncheckedBytes: hash)
     }
 
     /// The full serialized form: "type size\0data"
