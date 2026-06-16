@@ -14,5 +14,5 @@ import Foundation
 /// The primary namespace for GitKit public API.
 public enum GK {
     /// The current version of GitKit.
-    public static let version = "0.1.0"
+    public static let version = "1.0.6"
 }
