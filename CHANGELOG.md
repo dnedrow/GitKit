@@ -5,7 +5,7 @@ All notable changes to GitKit are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — 2026-06-16
+## [Released] — 2026-06-16
 
 This release is a comprehensive **security hardening pass** that closes the
 attack surface a Git implementation must cope with: parsing untrusted objects,
@@ -135,4 +135,4 @@ Added 32 new Swift Testing cases across seven new suites:
   is planned. Users who need authenticity guarantees should pair OIDs with
   signed commits/tags or other out-of-band integrity.
 
-[Unreleased]: ../../compare/1.0.4...HEAD
+[Unreleased]: ../../compare/1.0.4...1.0.5
