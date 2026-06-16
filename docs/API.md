@@ -147,6 +147,8 @@ if status.isClean {
 
 `status()` uses the index's cached filesystem stat metadata (size, mtime, ctime, inode, device) to skip re-hashing files whose stat is unchanged, so it stays fast on large working trees. Files touched within the same timestamp tick as the last index write are treated as "racily clean" and verified by content, so results remain correct even when stat alone cannot be trusted.
 
+Ignored files are excluded from the untracked set using Git's standard ignore sources (the global `core.excludesFile`, `.git/info/exclude`, and per-directory `.gitignore` files). Pattern matching follows Git semantics: a leading or middle `/` anchors a pattern to its `.gitignore`'s directory (so `/build` ignores `build/**` but not `src/build/`), a pattern that names a directory excludes everything beneath it, and `*`, `?`, `[...]`, and `**` are supported. Dotfiles (e.g. `.gitignore`, `.env`) are reported as untracked unless a rule ignores them; the `.git` directory is never reported.
+
 ## Log
 
 ```swift

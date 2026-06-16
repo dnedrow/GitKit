@@ -52,18 +52,23 @@ extension GKRepository {
         guard let enumerator = fm.enumerator(
             at: directoryURL,
             includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
+            options: []
         ) else {
             return
         }
 
         while let child = enumerator.nextObject() as? URL {
+            let relativePath = workTreeRelativePath(child) ?? child.lastPathComponent
+            // Never descend into or stage the .git directory.
+            if relativePath == ".git" || relativePath.hasPrefix(".git/") {
+                enumerator.skipDescendants()
+                continue
+            }
+
             var childIsDir: ObjCBool = false
             fm.fileExists(atPath: child.path, isDirectory: &childIsDir)
             if childIsDir.boolValue { continue }
 
-            let relativePath = workTreeRelativePath(child) ?? child.lastPathComponent
-            if relativePath.hasPrefix(".git") { continue }
             if !tracked.contains(relativePath) && ignore.isIgnored(path: relativePath) { continue }
 
             let data = try Data(contentsOf: child)

@@ -9,17 +9,30 @@ public protocol GKIgnoreProtocol {
 }
 
 /// Implements gitignore pattern matching.
+///
+/// Patterns are evaluated relative to the directory of the `.gitignore` (or
+/// exclude file) that defined them. Each pattern is paired with that directory's
+/// repository-root-relative path (`baseDir`, empty for the root, `.git/info/exclude`,
+/// and the global excludes file). Matching follows Git's anchoring and directory
+/// semantics over `/`-separated path segments.
 public struct GKIgnore: GKIgnoreProtocol {
-    let patterns: [GKIgnorePattern]
-
-    public init(patterns: [GKIgnorePattern] = []) {
-        self.patterns = patterns
+    /// A pattern together with the repo-root-relative directory it applies under.
+    struct ScopedPattern {
+        let baseDir: String
+        let pattern: GKIgnorePattern
     }
 
-    /// Creates an ignore matcher from a .gitignore file.
+    let entries: [ScopedPattern]
+
+    /// Creates a matcher from a flat list of patterns scoped to the repository root.
+    public init(patterns: [GKIgnorePattern] = []) {
+        self.entries = patterns.map { ScopedPattern(baseDir: "", pattern: $0) }
+    }
+
+    /// Creates an ignore matcher from a single `.gitignore` file (scoped to root).
     public init(from url: URL) throws {
         let content = try String(contentsOf: url, encoding: .utf8)
-        self.patterns = GKIgnore.parse(content)
+        self.entries = GKIgnore.parse(content).map { ScopedPattern(baseDir: "", pattern: $0) }
     }
 
     /// Parses gitignore file content into patterns.
@@ -30,31 +43,45 @@ public struct GKIgnore: GKIgnoreProtocol {
             .map { GKIgnorePattern(pattern: $0) }
     }
 
-    /// Builds an ignore matcher by merging patterns from multiple source files.
+    /// Builds an ignore matcher by merging patterns from multiple source files,
+    /// each scoped to a repository-root-relative base directory.
     ///
     /// Sources are read in the given order and their patterns concatenated, so later
     /// sources take precedence (last-match-wins, including negation). This is used to
-    /// combine the global `core.excludesFile`, `.git/info/exclude`, and per-directory
-    /// `.gitignore` files (shallow to deep).
+    /// combine the global `core.excludesFile` and `.git/info/exclude` (base `""`) with
+    /// per-directory `.gitignore` files (base = the file's directory, shallow to deep).
     ///
     /// Missing or unreadable files contribute zero patterns and never throw.
-    public init(mergingFiles urls: [URL]) {
-        var merged = [GKIgnorePattern]()
-        for url in urls {
-            guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            merged.append(contentsOf: GKIgnore.parse(content))
+    public init(sources: [(baseDir: String, url: URL)]) {
+        var merged = [ScopedPattern]()
+        for source in sources {
+            guard let content = try? String(contentsOf: source.url, encoding: .utf8) else { continue }
+            for pattern in GKIgnore.parse(content) {
+                merged.append(ScopedPattern(baseDir: source.baseDir, pattern: pattern))
+            }
         }
-        self.patterns = merged
+        self.entries = merged
     }
 
     public func isIgnored(path: String) -> Bool {
         var ignored = false
-        for pattern in patterns {
-            if pattern.matches(path: path) {
-                ignored = !pattern.isNegation
+        for entry in entries {
+            guard let relative = GKIgnore.relativePath(of: path, under: entry.baseDir) else { continue }
+            if entry.pattern.matches(path: relative) {
+                ignored = !entry.pattern.isNegation
             }
         }
         return ignored
+    }
+
+    /// Returns `path` relative to `baseDir`, or `nil` if `path` is not beneath it.
+    /// An empty `baseDir` means the repository root and returns the path unchanged.
+    static func relativePath(of path: String, under baseDir: String) -> String? {
+        if baseDir.isEmpty { return path }
+        if path == baseDir { return nil } // the directory itself, not a child
+        let prefix = baseDir + "/"
+        guard path.hasPrefix(prefix) else { return nil }
+        return String(path.dropFirst(prefix.count))
     }
 }
 
@@ -63,7 +90,11 @@ public struct GKIgnorePattern: Sendable {
     public let rawPattern: String
     public let isNegation: Bool
     public let isDirectoryOnly: Bool
-    let matchPattern: String
+    /// Whether the pattern is anchored to its base directory (a `/` appears at the
+    /// start or middle of the pattern). Non-anchored patterns match at any depth.
+    public let isAnchored: Bool
+    /// The pattern split into `/`-separated segments (may contain `**`).
+    let segments: [String]
 
     public init(pattern: String) {
         var p = pattern
@@ -73,58 +104,114 @@ public struct GKIgnorePattern: Sendable {
         self.isDirectoryOnly = p.hasSuffix("/")
         if isDirectoryOnly { p = String(p.dropLast()) }
 
+        // A separator at the start or middle anchors the pattern to its base dir.
+        self.isAnchored = p.contains("/")
+        if p.hasPrefix("/") { p = String(p.dropFirst()) }
+
         self.rawPattern = pattern
-        self.matchPattern = p
+        self.segments = p.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
     }
 
-    /// Checks if this pattern matches the given path.
+    /// Checks if this pattern matches the given path (already made relative to the
+    /// pattern's base directory).
     public func matches(path: String) -> Bool {
-        let components = path.split(separator: "/").map(String.init)
+        let pathSegments = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard !segments.isEmpty, !pathSegments.isEmpty else { return false }
 
-        if matchPattern.contains("/") {
-            // Pattern with path separator - match from root
-            return globMatch(path, pattern: matchPattern)
-        } else {
-            // Pattern without separator - match any component
-            for component in components {
-                if globMatch(component, pattern: matchPattern) {
-                    return true
-                }
-            }
-            return globMatch(path, pattern: matchPattern)
+        if isAnchored {
+            return matchesPrefix(pathSegments, startingAt: 0)
         }
+        // Floating: the pattern may match starting at any path segment.
+        for start in 0..<pathSegments.count {
+            if matchesPrefix(pathSegments, startingAt: start) { return true }
+        }
+        return false
     }
 
-    private func globMatch(_ string: String, pattern: String) -> Bool {
-        let s = Array(string)
-        let p = Array(pattern)
-        return globMatchHelper(s, 0, p, 0)
-    }
-
-    private func globMatchHelper(_ s: [Character], _ si: Int, _ p: [Character], _ pi: Int) -> Bool {
-        if pi == p.count { return si == s.count }
-        if p[pi] == "*" {
-            if pi + 1 < p.count && p[pi + 1] == "*" {
-                // ** matches everything including /
-                for i in si...s.count {
-                    if globMatchHelper(s, i, p, pi + 2) { return true }
+    /// Whether `segments` matches a prefix of `pathSegments[start...]`. If the match
+    /// stops before the end of the path, the path is inside a matched directory and
+    /// is ignored. If it matches exactly to the leaf, a directory-only pattern does
+    /// not match a (leaf) file.
+    private func matchesPrefix(_ pathSegments: [String], startingAt start: Int) -> Bool {
+        for end in start...pathSegments.count {
+            let slice = Array(pathSegments[start..<end])
+            if Self.matchSegments(segments, slice) {
+                if end < pathSegments.count {
+                    return true // path is beneath a matched directory
                 }
-                return false
+                return !isDirectoryOnly // exact leaf match
             }
-            // * matches everything except /
-            for i in si...s.count {
-                if i > si && (i <= s.count && s[i-1] == "/") { break }
-                if globMatchHelper(s, i, p, pi + 1) { return true }
+        }
+        return false
+    }
+
+    /// Whether `pat` matches the entire `path` segment slice, with `**` spanning
+    /// zero or more segments.
+    static func matchSegments(_ pat: [String], _ path: [String]) -> Bool {
+        if pat.isEmpty { return path.isEmpty }
+        let head = pat[0]
+        if head == "**" {
+            // Match zero or more leading path segments.
+            for split in 0...path.count {
+                if matchSegments(Array(pat.dropFirst()), Array(path[split...])) { return true }
             }
             return false
         }
-        if si == s.count { return false }
-        if p[pi] == "?" {
-            return s[si] != "/" && globMatchHelper(s, si + 1, p, pi + 1)
+        guard let first = path.first else { return false }
+        guard segmentMatch(Array(head), 0, Array(first), 0) else { return false }
+        return matchSegments(Array(pat.dropFirst()), Array(path.dropFirst()))
+    }
+
+    /// Glob-matches a single path segment against a single pattern segment,
+    /// supporting `*` (any run of non-`/`), `?` (one char), and `[...]`/`[!...]`.
+    private static func segmentMatch(_ p: [Character], _ pi: Int, _ s: [Character], _ si: Int) -> Bool {
+        if pi == p.count { return si == s.count }
+        switch p[pi] {
+        case "*":
+            // Collapse consecutive '*'; within a segment '*' matches any run.
+            var np = pi
+            while np < p.count && p[np] == "*" { np += 1 }
+            if np == p.count { return true }
+            for i in si...s.count {
+                if segmentMatch(p, np, s, i) { return true }
+            }
+            return false
+        case "?":
+            return si < s.count && segmentMatch(p, pi + 1, s, si + 1)
+        case "[":
+            guard si < s.count else { return false }
+            return matchCharClass(p, pi, s, si)
+        default:
+            return si < s.count && p[pi] == s[si] && segmentMatch(p, pi + 1, s, si + 1)
         }
-        if p[pi] == s[si] {
-            return globMatchHelper(s, si + 1, p, pi + 1)
+    }
+
+    /// Matches a `[...]` / `[!...]` character class at `p[pi]` against `s[si]`,
+    /// supporting ranges (`a-z`) and negation (`[!...]`).
+    private static func matchCharClass(_ p: [Character], _ pi: Int, _ s: [Character], _ si: Int) -> Bool {
+        var i = pi + 1
+        var negate = false
+        if i < p.count && (p[i] == "!" || p[i] == "^") { negate = true; i += 1 }
+
+        var matched = false
+        var hasClose = false
+        let ch = s[si]
+        while i < p.count {
+            if p[i] == "]" { hasClose = true; i += 1; break }
+            // Range like a-z (not when '-' is first or last in the class).
+            if i + 2 < p.count && p[i + 1] == "-" && p[i + 2] != "]" {
+                if ch >= p[i] && ch <= p[i + 2] { matched = true }
+                i += 3
+            } else {
+                if ch == p[i] { matched = true }
+                i += 1
+            }
         }
-        return false
+        // Malformed class (no closing ']'): treat '[' literally.
+        guard hasClose else {
+            return p[pi] == ch && segmentMatch(p, pi + 1, s, si + 1)
+        }
+        if matched == negate { return false }
+        return segmentMatch(p, i, s, si + 1)
     }
 }

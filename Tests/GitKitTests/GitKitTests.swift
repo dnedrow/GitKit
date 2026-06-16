@@ -208,6 +208,52 @@ struct GKIgnoreTests {
         #expect(!ignore.isIgnored(path: "important.o"))
         #expect(!ignore.isIgnored(path: "test.c"))
     }
+
+    // 4.1 Anchored directory patterns
+    @Test func anchoredDirectoryPattern() {
+        let ignore = GKIgnore(patterns: GKIgnore.parse("/build"))
+        #expect(ignore.isIgnored(path: "build/a.o"))
+        #expect(!ignore.isIgnored(path: "src/build/keep.o"))
+
+        let slash = GKIgnore(patterns: GKIgnore.parse("/build/"))
+        #expect(slash.isIgnored(path: "build/a.o"))
+        #expect(!slash.isIgnored(path: "src/build/keep.o"))
+    }
+
+    // 4.2 Anchored mid-slash pattern
+    @Test func anchoredMidSlashPattern() {
+        let ignore = GKIgnore(patterns: GKIgnore.parse("src/gen"))
+        #expect(ignore.isIgnored(path: "src/gen/file.swift"))
+        #expect(!ignore.isIgnored(path: "lib/src/gen/file.swift"))
+    }
+
+    // 4.3 Floating single token matches at any depth
+    @Test func floatingTokenMatchesAnyDepth() {
+        let ignore = GKIgnore(patterns: GKIgnore.parse("node_modules"))
+        #expect(ignore.isIgnored(path: "node_modules/x.js"))
+        #expect(ignore.isIgnored(path: "packages/a/node_modules/y.js"))
+    }
+
+    // 4.4 Glob: character classes, ?, *, and ** spanning directories
+    @Test func globAndDoubleStar() {
+        let cls = GKIgnore(patterns: GKIgnore.parse("*.[oa]"))
+        #expect(cls.isIgnored(path: "m.o"))
+        #expect(cls.isIgnored(path: "m.a"))
+        #expect(!cls.isIgnored(path: "m.c"))
+
+        let q = GKIgnore(patterns: GKIgnore.parse("file?.txt"))
+        #expect(q.isIgnored(path: "file1.txt"))
+        #expect(!q.isIgnored(path: "file10.txt"))
+
+        let ds = GKIgnore(patterns: GKIgnore.parse("logs/**/*.txt"))
+        #expect(ds.isIgnored(path: "logs/2026/06/x.txt"))
+        #expect(ds.isIgnored(path: "logs/a.txt"))
+        #expect(!ds.isIgnored(path: "logs/a.csv"))
+
+        let neg = GKIgnore(patterns: GKIgnore.parse("[!a].txt"))
+        #expect(neg.isIgnored(path: "b.txt"))
+        #expect(!neg.isIgnored(path: "a.txt"))
+    }
 }
 
 // MARK: - Gitignore Exclusion Tests
@@ -350,6 +396,54 @@ struct GKGitignoreExclusionTests {
         let status = try repo.status()
         #expect(!status.untracked.contains("debug.log"))
         #expect(status.unstaged.contains { $0.path == "tracked.txt" })
+    }
+
+    // 4.8 The reported bug: root-anchored directory excludes its contents from status.
+    @Test func statusExcludesRootAnchoredIgnoredDirectory() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try write("/dist\n", to: dir.appendingPathComponent(".gitignore"))
+        try write("x", to: dir.appendingPathComponent("dist/bundle.js"))
+        try write("y", to: dir.appendingPathComponent("keep.txt"))
+
+        let status = try repo.status()
+        #expect(!status.untracked.contains("dist/bundle.js"))
+        #expect(status.untracked.contains("keep.txt"))
+    }
+
+    // 4.6 Nested .gitignore is scoped to its own directory.
+    @Test func nestedGitignoreIsScopedToItsDirectory() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try write("/build\n", to: dir.appendingPathComponent("sub/.gitignore"))
+        #expect(repo.isIgnored("sub/build/x.o"))
+        #expect(!repo.isIgnored("build/y.o"))
+
+        try write("*.log\n", to: dir.appendingPathComponent("sub2/.gitignore"))
+        #expect(repo.isIgnored("sub2/a.log"))
+        #expect(repo.isIgnored("sub2/deep/b.log"))
+        #expect(!repo.isIgnored("other/c.log"))
+    }
+
+    // 4.7 Dotfiles: non-ignored reported untracked; ignored excluded; .git never reported.
+    @Test func statusReportsNonIgnoredDotfilesButNotGitOrIgnored() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try write(".env\n", to: dir.appendingPathComponent(".gitignore"))
+        try write("secret", to: dir.appendingPathComponent(".env"))
+        try write("x", to: dir.appendingPathComponent(".keepme"))
+
+        let status = try repo.status()
+        // Non-ignored dotfiles (.gitignore itself and .keepme) are reported.
+        #expect(status.untracked.contains(".gitignore"))
+        #expect(status.untracked.contains(".keepme"))
+        // The ignored dotfile is not reported.
+        #expect(!status.untracked.contains(".env"))
+        // Nothing under .git is ever reported.
+        #expect(!status.untracked.contains { $0.hasPrefix(".git/") })
     }
 }
 
