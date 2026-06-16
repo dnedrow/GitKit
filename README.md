@@ -2,8 +2,8 @@
 
 A **pure Swift** implementation of Git, inspired by [libgit2](https://libgit2.org). GitKit provides a protocol-oriented API for Git operations — no C dependencies, no shelling out to `git`, just Swift.
 
-[![Swift 5.9+](https://img.shields.io/badge/Swift-5.9+-orange.svg)](https://swift.org)
-[![Platforms](https://img.shields.io/badge/Platforms-macOS%2013+%20|%20iOS%2016+%20|%20tvOS%2016+%20|%20watchOS%209+-blue.svg)](https://developer.apple.com)
+[![Swift 6.0+](https://img.shields.io/badge/Swift-6.0+-orange.svg)](https://swift.org)
+[![Platforms](https://img.shields.io/badge/Platforms-macOS%2015+%20|%20iOS%2018+%20|%20tvOS%2018+%20|%20watchOS%2011+-blue.svg)](https://developer.apple.com)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 > [!WARNING]
@@ -26,6 +26,11 @@ A **pure Swift** implementation of Git, inspired by [libgit2](https://libgit2.or
 - **Cross-platform** — macOS, iOS, tvOS, watchOS
 
 ## Installation
+
+### Requirements
+
+- Swift 6.0+ (Swift tools version 6.0)
+- macOS 15+, iOS 18+, tvOS 18+, or watchOS 11+
 
 ### Swift Package Manager
 
@@ -67,23 +72,26 @@ For the full API reference with code examples, see [docs/API.md](docs/API.md).
 
 ## Core Types
 
-| Type           | Description                                            |
-|----------------|--------------------------------------------------------|
-| `GKRepository` | Main entry point — open, create, or clone repositories |
-| `GKObjectID`   | 20-byte SHA-1 hash identifier                          |
-| `GKBlob`       | File content object                                    |
-| `GKTree`       | Directory listing object                               |
-| `GKCommit`     | Commit object with parents, tree, author, message      |
-| `GKTag`        | Annotated tag object                                   |
-| `GKSignature`  | Author/committer identity with timestamp               |
-| `GKReference`  | Named pointer to an object (branch, tag)               |
-| `GKBranch`     | Branch information (name, commit, upstream)            |
-| `GKHead`       | HEAD state (branch or detached)                        |
-| `GKDiff`       | Diff result with deltas and hunks                      |
-| `GKStatus`     | Working directory status (staged, unstaged, untracked) |
-| `GKIndex`      | Staging area (index file)                              |
-| `GKRemote`     | Remote configuration (name, URL, refspec)              |
-| `GKError`      | Comprehensive error enum for all failure modes         |
+| Type              | Description                                            |
+|-------------------|--------------------------------------------------------|
+| `GKRepository`    | Main entry point — open, create, or clone repositories |
+| `GKObjectID`      | 20-byte SHA-1 hash identifier                          |
+| `GKObjectType`    | Object kind enum (blob, tree, commit, tag)             |
+| `GKBlob`          | File content object                                    |
+| `GKTree`          | Directory listing object                               |
+| `GKCommit`        | Commit object with parents, tree, author, message      |
+| `GKTag`           | Annotated tag object                                   |
+| `GKSignature`     | Author/committer identity with timestamp               |
+| `GKReference`     | Named pointer to an object (branch, tag)               |
+| `GKBranch`        | Branch information (name, commit, upstream)            |
+| `GKHead`          | HEAD state (branch or detached)                        |
+| `GKDiff`          | Diff result with deltas and hunks                      |
+| `GKStatus`        | Working directory status (staged, unstaged, untracked) |
+| `GKIndex`         | Staging area (index file)                              |
+| `GKFileStat`      | Cached filesystem stat metadata for index entries      |
+| `GKConfiguration` | Git config file reader/writer                          |
+| `GKRemote`        | Remote configuration (name, URL, refspec)              |
+| `GKError`         | Comprehensive error enum for all failure modes         |
 
 ## Protocols
 
