@@ -63,6 +63,7 @@ public struct GKConfiguration: GKConfigurationProtocol {
 
     public mutating func set(_ key: String, value: String) throws {
         let (section, subsection, name) = splitKey(key)
+        try GKConfiguration.validateIdentifiers(section: section, subsection: subsection, name: name)
 
         if let idx = sections.firstIndex(where: { $0.name == section && $0.subsection == subsection }) {
             if let entryIdx = sections[idx].entries.firstIndex(where: { $0.key == name }) {
@@ -148,6 +149,97 @@ public struct GKConfiguration: GKConfigurationProtocol {
 
     // MARK: - Private
 
+    /// Validates the identifiers that compose a config key before they are
+    /// written to disk.
+    ///
+    /// The section name and variable name are written **unquoted**, so they must
+    /// contain only characters Git permits there (letters, digits, `-`, and `.`
+    /// for sections). The subsection is quoted and escaped on write, so it only
+    /// needs to be free of newlines and NUL bytes, which Git forbids and which
+    /// could otherwise break out of the header.
+    static func validateIdentifiers(section: String, subsection: String?, name: String) throws {
+        func isSectionChar(_ scalar: Unicode.Scalar) -> Bool {
+            ("a"..."z").contains(scalar) || ("A"..."Z").contains(scalar)
+                || ("0"..."9").contains(scalar) || scalar == "-" || scalar == "."
+        }
+        func isNameChar(_ scalar: Unicode.Scalar) -> Bool {
+            ("a"..."z").contains(scalar) || ("A"..."Z").contains(scalar)
+                || ("0"..."9").contains(scalar) || scalar == "-"
+        }
+
+        guard !section.isEmpty, section.unicodeScalars.allSatisfy(isSectionChar) else {
+            throw GKError.invalidConfiguration("invalid section name '\(section)'")
+        }
+        guard !name.isEmpty, name.unicodeScalars.allSatisfy(isNameChar) else {
+            throw GKError.invalidConfiguration("invalid variable name '\(name)'")
+        }
+        if let subsection {
+            for scalar in subsection.unicodeScalars where scalar == "\n" || scalar == "\r" || scalar == "\0" {
+                throw GKError.invalidConfiguration("invalid subsection name '\(subsection)'")
+            }
+        }
+    }
+
+    /// Unescapes a quoted/escaped config value, honoring inline `#`/`;` comments
+    /// outside of quotes. This is the read-side counterpart to `escapeValue`.
+    static func parseValue(_ raw: String) -> String {
+        // Leading whitespace (always outside quotes) is insignificant in Git.
+        let trimmed = Substring(raw).drop { $0 == " " || $0 == "\t" }
+        let characters = Array(trimmed)
+
+        var result = [Character]()
+        var inQuotes = false
+        var trailingUnquotedWhitespace = 0
+        var index = 0
+
+        while index < characters.count {
+            let character = characters[index]
+
+            if character == "\\", index + 1 < characters.count {
+                let next = characters[index + 1]
+                let mapped: Character
+                switch next {
+                case "n": mapped = "\n"
+                case "t": mapped = "\t"
+                case "b": mapped = "\u{08}"
+                case "\"": mapped = "\""
+                case "\\": mapped = "\\"
+                default: mapped = next
+                }
+                result.append(mapped)
+                trailingUnquotedWhitespace = 0
+                index += 2
+                continue
+            }
+
+            if character == "\"" {
+                inQuotes.toggle()
+                index += 1
+                continue
+            }
+
+            if !inQuotes && (character == "#" || character == ";") {
+                break // Start of an inline comment.
+            }
+
+            if !inQuotes && (character == " " || character == "\t") {
+                result.append(character)
+                trailingUnquotedWhitespace += 1
+                index += 1
+                continue
+            }
+
+            result.append(character)
+            trailingUnquotedWhitespace = 0
+            index += 1
+        }
+
+        if trailingUnquotedWhitespace > 0 {
+            result.removeLast(trailingUnquotedWhitespace)
+        }
+        return String(result)
+    }
+
     private func splitKey(_ key: String) -> (section: String, subsection: String?, name: String) {
         let parts = key.split(separator: ".", maxSplits: 2).map(String.init)
         if parts.count == 3 {
@@ -168,15 +260,70 @@ public struct GKConfiguration: GKConfigurationProtocol {
         var lines = [String]()
         for section in sections {
             if let sub = section.subsection {
-                lines.append("[\(section.name) \"\(sub)\"]")
+                lines.append("[\(section.name) \"\(GKConfiguration.escapeSubsection(sub))\"]")
             } else {
                 lines.append("[\(section.name)]")
             }
             for entry in section.entries {
-                lines.append("\t\(entry.key) = \(entry.value)")
+                lines.append("\t\(entry.key) = \(GKConfiguration.escapeValue(entry.value))")
             }
         }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    // MARK: - Escaping
+
+    /// Escapes a subsection name for a `[section "subsection"]` header.
+    ///
+    /// Only backslash and double-quote are special inside the quoted subsection;
+    /// escaping them prevents a value such as `origin"]\n[core` from closing the
+    /// header early and injecting a new section. Newlines are rejected upstream
+    /// in `set(_:value:)` because Git does not permit them in a subsection.
+    static func escapeSubsection(_ value: String) -> String {
+        var result = ""
+        for character in value {
+            switch character {
+            case "\\": result += "\\\\"
+            case "\"": result += "\\\""
+            default: result.append(character)
+            }
+        }
+        return result
+    }
+
+    /// Escapes and, when necessary, double-quotes a configuration value so it
+    /// cannot inject additional lines or sections into the config file.
+    ///
+    /// Newlines, tabs, backspaces, quotes, backslashes, comment characters
+    /// (`#`/`;`), other control characters, and leading/trailing whitespace all
+    /// force the value to be wrapped in quotes with the appropriate escapes. This
+    /// is the primary defense against config-injection: a remote URL containing
+    /// `\n[core]\n\tsshCommand = ...` is stored as a single inert quoted value.
+    static func escapeValue(_ value: String) -> String {
+        var escaped = ""
+        var needsQuoting = value.isEmpty
+            || value.first == " " || value.first == "\t"
+            || value.last == " " || value.last == "\t"
+
+        for character in value {
+            switch character {
+            case "\\": escaped += "\\\\"; needsQuoting = true
+            case "\"": escaped += "\\\""; needsQuoting = true
+            case "\n": escaped += "\\n"; needsQuoting = true
+            case "\t": escaped += "\\t"; needsQuoting = true
+            case "\u{08}": escaped += "\\b"; needsQuoting = true
+            case "#", ";": escaped.append(character); needsQuoting = true
+            default:
+                if let ascii = character.asciiValue, ascii < 0x20 {
+                    // Other control characters: keep verbatim but force quoting
+                    // so they cannot be mistaken for line structure.
+                    needsQuoting = true
+                }
+                escaped.append(character)
+            }
+        }
+
+        return needsQuoting ? "\"\(escaped)\"" : escaped
     }
 
     private static func parse(_ content: String) -> [GKConfigSection] {
@@ -216,10 +363,26 @@ public struct GKConfiguration: GKConfigurationProtocol {
         let content = line.dropFirst().dropLast() // Remove [ and ]
         if let quoteStart = content.firstIndex(of: "\"") {
             name = String(content[..<quoteStart]).trimmingCharacters(in: .whitespaces)
-            let afterQuote = content.index(after: quoteStart)
-            if let quoteEnd = content[afterQuote...].firstIndex(of: "\"") {
-                subsection = String(content[afterQuote..<quoteEnd])
+            // Walk the quoted subsection, honoring `\\` and `\"` escapes, until
+            // the matching unescaped closing quote.
+            var sub = ""
+            var index = content.index(after: quoteStart)
+            while index < content.endIndex {
+                let character = content[index]
+                if character == "\\" {
+                    let next = content.index(after: index)
+                    if next < content.endIndex {
+                        sub.append(content[next])
+                        index = content.index(after: next)
+                        continue
+                    }
+                } else if character == "\"" {
+                    break
+                }
+                sub.append(character)
+                index = content.index(after: index)
             }
+            subsection = sub
         } else {
             name = String(content).trimmingCharacters(in: .whitespaces)
         }
@@ -235,7 +398,7 @@ public struct GKConfiguration: GKConfigurationProtocol {
             return key.isEmpty ? nil : GKConfigEntry(key: key, value: "true")
         }
         let key = String(parts[0]).trimmingCharacters(in: .whitespaces)
-        let value = String(parts[1]).trimmingCharacters(in: .whitespaces)
+        let value = parseValue(String(parts[1]))
         return GKConfigEntry(key: key, value: value)
     }
 }

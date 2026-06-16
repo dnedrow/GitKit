@@ -1415,3 +1415,99 @@ struct GKCheckoutSecurityTests {
         }
     }
 }
+
+// MARK: - Configuration Injection Tests
+
+@Suite("GKConfigurationSecurity")
+struct GKConfigurationSecurityTests {
+    private func makeConfig() throws -> (GKConfiguration, URL) {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitkit-config-\(UUID().uuidString)")
+        try Data().write(to: url)
+        let config = try GKConfiguration(from: url)
+        return (config, url)
+    }
+
+    /// A value containing a newline + forged section must not introduce new
+    /// keys when the file is re-parsed.
+    @Test func newlineInValueDoesNotInjectSections() throws {
+        var (config, url) = try makeConfig()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let malicious = "https://example.com/repo.git\n[core]\n\tsshCommand = touch /tmp/pwned"
+        try config.set("remote.origin.url", value: malicious)
+
+        // Re-read from disk and confirm no injected section/key appeared.
+        let reread = try GKConfiguration(from: url)
+        #expect(reread.getString("core.sshCommand") == nil)
+        // The original value round-trips intact.
+        #expect(reread.getString("remote.origin.url") == malicious)
+    }
+
+    /// The serialized form must keep a newline-bearing value on a single
+    /// physical line (quoted + escaped).
+    @Test func serializedValueIsSingleLine() throws {
+        var (config, url) = try makeConfig()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try config.set("core.pager", value: "less\ninjected = 1")
+        let contents = try String(contentsOf: url, encoding: .utf8)
+        #expect(contents.contains("\\n"))
+        #expect(!contents.contains("injected = 1\n") || contents.contains("\\ninjected"))
+        // Exactly one section header should be present.
+        let headerCount = contents.components(separatedBy: "[core]").count - 1
+        #expect(headerCount == 1)
+    }
+
+    /// A quote in a subsection name (e.g. a remote name) cannot break out of
+    /// the quoted header; it is escaped and round-trips intact.
+    @Test func quoteInSubsectionDoesNotInjectHeader() throws {
+        var (config, url) = try makeConfig()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // Remote name attempts to close the quoted subsection and open [core].
+        try config.set("remote.x\"] [core.url", value: "ok")
+
+        let contents = try String(contentsOf: url, encoding: .utf8)
+        // The quote must be escaped in the header, not left raw.
+        #expect(contents.contains("\\\""))
+        // No second section header may have been forged.
+        #expect(!contents.contains("[core]"))
+
+        let reread = try GKConfiguration(from: url)
+        #expect(reread.getString("core.url") == nil)
+    }
+
+    /// Newlines in a subsection are rejected outright.
+    @Test func newlineInSubsectionThrows() throws {
+        var (config, url) = try makeConfig()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        #expect(throws: GKError.self) {
+            try config.set("remote.evil\nname.url", value: "x")
+        }
+    }
+
+    /// Ordinary values round-trip without spurious quoting.
+    @Test func ordinaryValuesRoundTrip() throws {
+        var (config, url) = try makeConfig()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try config.set("user.name", value: "Jane Dev")
+        try config.set("user.email", value: "jane@example.com")
+        let reread = try GKConfiguration(from: url)
+        #expect(reread.getString("user.name") == "Jane Dev")
+        #expect(reread.getString("user.email") == "jane@example.com")
+    }
+
+    /// Values with quotes, tabs, and comment characters survive a round-trip.
+    @Test func specialCharactersRoundTrip() throws {
+        var (config, url) = try makeConfig()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let value = "a\tb \"quoted\" # not-a-comment \\ end"
+        try config.set("core.special", value: value)
+        let reread = try GKConfiguration(from: url)
+        #expect(reread.getString("core.special") == value)
+    }
+}
