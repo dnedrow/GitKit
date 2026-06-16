@@ -3,7 +3,6 @@ import Foundation
 // MARK: - High-Level Git Operations
 
 extension GKRepository {
-
     // MARK: - Add (Stage)
 
     /// Stages a file (or directory) for the next commit.

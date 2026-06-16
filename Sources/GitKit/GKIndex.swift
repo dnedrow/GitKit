@@ -125,7 +125,7 @@ public struct GKIndex: GKIndexProtocol {
 
         // Version
         let version = UInt32(bytes[4]) << 24 | UInt32(bytes[5]) << 16 |
-                      UInt32(bytes[6]) << 8 | UInt32(bytes[7])
+            UInt32(bytes[6]) << 8 | UInt32(bytes[7])
         guard version == 2 || version == 3 || version == 4 else {
             throw GKError.indexError("Unsupported index version: \(version)")
         }
@@ -133,7 +133,7 @@ public struct GKIndex: GKIndexProtocol {
 
         // Entry count
         let entryCount = Int(UInt32(bytes[8]) << 24 | UInt32(bytes[9]) << 16 |
-                             UInt32(bytes[10]) << 8 | UInt32(bytes[11]))
+                                UInt32(bytes[10]) << 8 | UInt32(bytes[11]))
 
         var entries = [GKIndexEntry]()
         var offset = 12
@@ -322,7 +322,7 @@ public struct GKIndex: GKIndexProtocol {
 
     private static func readUInt32(_ bytes: [UInt8], at offset: Int) -> UInt32 {
         UInt32(bytes[offset]) << 24 | UInt32(bytes[offset + 1]) << 16 |
-        UInt32(bytes[offset + 2]) << 8 | UInt32(bytes[offset + 3])
+            UInt32(bytes[offset + 2]) << 8 | UInt32(bytes[offset + 3])
     }
 
     private static func appendUInt32(_ data: inout Data, _ value: UInt32) {

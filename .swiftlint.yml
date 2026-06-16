@@ -1,0 +1,269 @@
+# Rules are current as of 0.52.4
+---
+included:
+  - Sources
+excluded:
+  - "**/*.lock"
+  - "**/*.resolved"
+  - share
+
+analyzer_rules:
+  - explicit_self #Correctable #opt_in_rules
+  - unused_import #Correctable #opt_in_rules
+#  - capture_variable #opt_in_rules
+#  - typesafe_array_init #opt_in_rules
+#  - unused_declaration #opt_in_rules
+
+
+### Begin Customized Default Rules
+line_length:
+  warning: 150
+  error: 180
+  ignores_urls: true
+  ignores_comments: true
+
+file_length:
+  warning: 500
+  error: 1200
+  ignore_comment_only_lines: true
+
+function_body_length:
+  warning: 75
+  error: 150
+
+### End Customized Default Rules
+
+### To disable a `default` rule, uncomment it.
+### To customize a default rule, so so in the block above.
+disabled_rules:
+#  - blanket_disable_command
+#  - block_based_kvo
+#  - class_delegate_protocol
+#  - closing_brace #Correctable
+  - closure_parameter_position
+#  - colon #Correctable
+#  - comma #Correctable
+#  - comment_spacing #Correctable
+#  - compiler_protocol_init
+#  - computed_accessors_order
+#  - control_statement #Correctable
+#  - custom_rules
+  - cyclomatic_complexity
+#  - deployment_target
+#  - discouraged_direct_init
+  - duplicate_conditions
+#  - duplicate_enum_cases
+#  - duplicate_imports #Correctable
+#  - duplicated_key_in_dictionary_literal
+#  - dynamic_inline
+#  - empty_enum_arguments #Correctable
+#  - empty_parameters #Correctable
+#  - empty_parentheses_with_trailing_closure #Correctable
+  - for_where
+#  - force_cast
+  - force_try
+  - function_parameter_count
+#  - generic_type_name
+  - identifier_name
+#  - implicit_getter
+  - inclusive_language
+#  - invalid_swiftlint_command
+#  - is_disjoint
+#  - large_tuple
+#  - leading_whitespace #Correctable
+#  - legacy_cggeometry_functions #Correctable
+#  - legacy_constant #Correctable
+#  - legacy_constructor #Correctable
+#  - legacy_hashing
+#  - legacy_nsgeometry_functions #Correctable
+#  - legacy_random
+#  - line_length # See custom rule
+#  - mark #Correctable
+#  - multiple_closures_with_trailing_closure
+#  - nesting
+#  - no_fallthrough_only
+#  - no_space_in_method_call #Correctable
+#  - notification_center_detachment
+  - ns_number_init_as_function_reference
+#  - nsobject_prefer_isequal
+#  - opening_brace #Correctable
+#  - operator_whitespace
+#  - orphaned_doc_comment
+#  - private_over_fileprivate #Correctable
+#  - private_unit_test #Correctable
+#  - protocol_property_accessors_order #Correctable
+#  - reduce_boolean
+#  - redundant_discardable_let #Correctable
+#  - redundant_objc_attribute #Correctable
+#  - redundant_optional_initialization #Correctable
+#  - redundant_set_access_control
+#  - redundant_string_enum_value
+#  - redundant_void_return #Correctable
+#  - return_arrow_whitespace #Correctable
+#  - self_in_property_initialization
+#  - shorthand_operator
+#  - statement_position #Correctable
+#  - superfluous_disable_command
+#  - switch_case_alignment
+#  - syntactic_sugar #Correctable
+  - todo
+#  - trailing_comma #Correctable
+#  - trailing_newline #Correctable
+#  - trailing_semicolon #Correctable
+#  - trailing_whitespace #Correctable
+  - type_body_length
+#  - type_name
+#  - unavailable_condition
+#  - unneeded_break_in_switch
+  - unneeded_synthesized_initializer #Correctable
+  - unused_closure_parameter #Correctable
+#  - unused_control_flow_label #Correctable
+#  - unused_enumerated
+#  - unused_optional_binding
+#  - unused_setter_value
+#  - valid_ibinspectable
+#  - vertical_parameter_alignment
+#  - vertical_whitespace #Correctable
+  - void_function_in_ternary
+#  - void_return #Correctable
+#  - xctfail_message
+
+# Uncomment an opt-in rule to enable it
+opt_in_rules:
+#  - accessibility_label_for_image
+  - accessibility_trait_for_button
+#  - anonymous_argument_in_multiline_closure
+#  - anyobject_protocol #Correctable
+#  - array_init
+#  - attributes
+#  - balanced_xctest_lifecycle
+#  - capture_variable #See analyzer_rules
+#  - closure_body_length
+  - closure_end_indentation #Correctable
+  - closure_spacing #Correctable
+#  - collection_alignment
+#  - comma_inheritance #Correctable
+#  - conditional_returns_on_newline
+#  - contains_over_filter_count
+#  - contains_over_filter_is_empty
+#  - contains_over_first_not_nil
+#  - contains_over_range_nil_comparison
+#  - convenience_type
+#  - direct_return #Correctable
+#  - discarded_notification_center_observer
+#  - discouraged_assert
+#  - discouraged_none_name
+#  - discouraged_object_literal
+#  - discouraged_optional_boolean
+#  - discouraged_optional_collection
+#  - empty_collection_literal
+#  - empty_count
+#  - empty_string
+#  - empty_xctest_method
+#  - enum_case_associated_values_count
+#  - expiring_todo
+#  - explicit_acl
+#  - explicit_enum_raw_value
+#  - explicit_init #Correctable
+#  - explicit_self #Correctable See analyzer_rules
+#  - explicit_top_level_acl
+#  - explicit_type_interface
+#  - extension_access_modifier
+#  - fallthrough
+#  - fatal_error_message
+#  - file_header
+#  - file_name
+  - file_name_no_space
+#  - file_types_order
+#  - first_where
+#  - flatmap_over_map_reduce
+#  - force_unwrapping
+#  - function_default_parameter_at_end
+#  - ibinspectable_in_extension
+#  - identical_operands
+#  - implicit_return #Correctable
+#  - implicitly_unwrapped_optional
+#  - indentation_width
+#  - inert_defer
+  - joined_default_parameter #Correctable
+#  - last_where
+#  - legacy_multiple
+#  - legacy_objc_type
+#  - let_var_whitespace
+  - literal_expression_end_indentation #Correctable
+#  - local_doc_comment
+#  - lower_acl_than_parent #Correctable
+#  - missing_docs
+  - modifier_order #Correctable
+#  - multiline_arguments
+#  - multiline_arguments_brackets
+#  - multiline_function_chains
+#  - multiline_literal_brackets
+#  - multiline_parameters
+#  - multiline_parameters_brackets
+  - nimble_operator #Correctable
+#  - no_extension_access_modifier
+#  - no_grouping_extension
+#  - no_magic_numbers
+#  - nslocalizedstring_key
+#  - nslocalizedstring_require_bundle
+#  - number_separator #Correctable
+#  - object_literal
+  - operator_usage_whitespace #Correctable
+  - optional_enum_case_matching #Correctable
+#  - overridden_super_call
+#  - override_in_extension
+#  - pattern_matching_keywords
+#  - period_spacing # Correctable
+#  - prefer_nimble
+#  - prefer_self_in_static_references #Correctable
+  - prefer_self_type_over_type_of_self #Correctable
+  - prefer_zero_over_explicit_init #Correctable
+#  - prefixed_toplevel_constant
+#  - private_action
+#  - private_outlet
+#  - private_subject
+#  - prohibited_interface_builder
+#  - prohibited_super_call
+#  - quick_discouraged_call
+#  - quick_discouraged_focused_test
+#  - quick_discouraged_pending_test
+#  - raw_value_for_camel_cased_codable_enum
+#  - reduce_into
+  - redundant_nil_coalescing #Correctable
+#  - redundant_self_in_closure #Correctable
+#  - redundant_type_annotation #Correctable
+#  - required_deinit
+#  - required_enum_case
+#  - return_value_from_void_function
+#  - self_binding #Correctable
+#  - shorthand_optional_binding #Correctable
+#  - single_test_class
+#  - sorted_enum_cases
+#  - sorted_first_last
+  - sorted_imports #Correctable
+#  - static_operator
+#  - strict_fileprivate
+#  - strong_iboutlet #Correctable
+#  - superfluous_else
+#  - switch_case_on_newline
+#  - test_case_accessibility #Correctable
+  - toggle_bool #Correctable
+#  - trailing_closure
+#  - type_contents_order
+#  - typesafe_array_init #See analyzer_rules
+#  - unavailable_function
+#  - unhandled_throwing_task
+  - unneeded_parentheses_in_closure_argument #Correctable
+#  - unowned_variable_capture
+#  - untyped_error_in_catch #Correctable
+#  - unused_capture_list
+#  - unused_declaration #See analyzer_rules
+#  - unused_import #Correctable #See analyzer_rules
+#  - vertical_parameter_alignment_on_call
+#  - vertical_whitespace_between_cases #Correctable
+  - vertical_whitespace_closing_braces #Correctable
+  - vertical_whitespace_opening_braces #Correctable
+  - weak_delegate
+#  - xct_specific_matcher
+#  - yoda_condition

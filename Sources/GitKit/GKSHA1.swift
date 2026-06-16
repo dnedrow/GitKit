@@ -52,7 +52,7 @@ enum GKSHA1 {
             }
 
             for i in 16..<80 {
-                w[i] = leftRotate(w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16], by: 1)
+                w[i] = leftRotate(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], by: 1)
             }
 
             var a = h0, b = h1, c = h2, d = h3, e = h4

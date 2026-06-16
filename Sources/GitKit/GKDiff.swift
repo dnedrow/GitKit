@@ -194,17 +194,17 @@ enum GKDiffEngine {
 
         while oldIdx < oldLines.count || newIdx < newLines.count {
             if lcsIdx < lcs.count && oldIdx < oldLines.count && newIdx < newLines.count &&
-               oldLines[oldIdx] == lcs[lcsIdx] && newLines[newIdx] == lcs[lcsIdx] {
+                oldLines[oldIdx] == lcs[lcsIdx] && newLines[newIdx] == lcs[lcsIdx] {
                 diffLines.append(GKDiffLine(origin: .context, content: oldLines[oldIdx]))
                 oldIdx += 1
                 newIdx += 1
                 lcsIdx += 1
             } else if newIdx < newLines.count &&
-                      (lcsIdx >= lcs.count || newLines[newIdx] != lcs[lcsIdx]) {
+                        (lcsIdx >= lcs.count || newLines[newIdx] != lcs[lcsIdx]) {
                 diffLines.append(GKDiffLine(origin: .addition, content: newLines[newIdx]))
                 newIdx += 1
             } else if oldIdx < oldLines.count &&
-                      (lcsIdx >= lcs.count || oldLines[oldIdx] != lcs[lcsIdx]) {
+                        (lcsIdx >= lcs.count || oldLines[oldIdx] != lcs[lcsIdx]) {
                 diffLines.append(GKDiffLine(origin: .deletion, content: oldLines[oldIdx]))
                 oldIdx += 1
             }

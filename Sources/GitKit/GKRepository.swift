@@ -56,7 +56,7 @@ public final class GKRepository: GKRepositoryProtocol {
         var bare = false
 
         if fm.fileExists(atPath: path.appendingPathComponent("HEAD").path) &&
-           fm.fileExists(atPath: path.appendingPathComponent("objects").path) {
+            fm.fileExists(atPath: path.appendingPathComponent("objects").path) {
             // This is a bare repo or .git dir itself
             if fm.fileExists(atPath: path.appendingPathComponent("config").path) {
                 gitDirCandidate = path
@@ -332,7 +332,7 @@ public final class GKRepository: GKRepositoryProtocol {
             let indexMtimeSeconds = GKFileStat.read(at: gitDir.appendingPathComponent("index"))?.mtimeSeconds ?? 0
 
             if let enumerator = fm.enumerator(at: workDir, includingPropertiesForKeys: [.isRegularFileKey],
-                                               options: []) {
+                                              options: []) {
                 while let fileURL = enumerator.nextObject() as? URL {
                     let relativePath = workTreeRelativePath(fileURL) ?? fileURL.lastPathComponent
                     // Never descend into or report the .git directory.

@@ -173,7 +173,7 @@ final class GKLooseObjectDatabase: GKObjectDatabase {
 
             guard let data = try? Data(contentsOf: packURL),
                   let parsed = try? GKPackfileReader.parse(data, baseLookup: { [weak self] oid in
-                      try self?.readLoose(oid: oid)
+                    try self?.readLoose(oid: oid)
                   }) else { continue }
 
             for object in parsed {

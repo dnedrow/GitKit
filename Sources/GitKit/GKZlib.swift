@@ -158,7 +158,7 @@ enum GKZlib {
                 // No compression (stored block)
                 reader.alignToByte()
                 let len = try reader.readUInt16LE()
-                let _ = try reader.readUInt16LE() // NLEN
+                _ = try reader.readUInt16LE() // NLEN
                 let blockData = try reader.readBytes(Int(len))
                 output.append(contentsOf: blockData)
 
