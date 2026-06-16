@@ -240,3 +240,35 @@ let headOID = try repo.GKHeadCommitOID()
 // List all references
 let refs = try repo.references()
 ```
+
+## Object IDs
+
+```swift
+// From a 40-character hex string (failable)
+let oid = GKObjectID(hex: "abc1234567890abcdef1234567890abcdef12345")
+
+// From raw bytes (throws on a wrong length — never traps)
+let oid = try GKObjectID(bytes: rawBytes)
+```
+
+> **Note.** `GKObjectID(bytes:)` is a throwing initializer. Pass exactly 20 bytes; a wrong length throws `GKError.invalidObject` with the actual byte count for diagnostics. This is intentional so parser code that hits malformed input fails gracefully instead of trapping.
+
+## Security & Validation
+
+GitKit hardens the paths that consume untrusted input (objects parsed from disk, refs and config written during clone/fetch, packs received from the network). The behavior is enforced automatically — callers do not need to opt in — but several `GKError` cases surface specifically for these checks:
+
+| Error                                   | Raised when                                                                                                                                     |
+|-----------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| `.unsafePath(String)`                   | A tree entry name (or its joined working-directory path) attempts traversal, names `.git`, contains a path separator, or escapes the work tree. |
+| `.invalidReferenceName(String)`         | A reference name fails `git check-ref-format` rules (traversal, `.lock` suffix, control characters, forbidden bytes, …).                        |
+| `.objectHashMismatch(expected:actual:)` | A loose or packed object's content does not re-hash to the OID it is filed under (storage tampering or corruption).                             |
+| `.invalidConfiguration(String)`         | A configuration key/subsection contains characters that cannot be safely serialized (e.g. a newline in a subsection name).                      |
+| `.zlibError(String)`                    | Decompression would exceed the per-call output cap (decompression-bomb defense).                                                                |
+| `.packfileError(String)`                | A packfile is truncated, has malformed varints, declares an implausible object count, or references an unresolvable delta base.                 |
+
+Practical implications for callers:
+
+- **Clone/fetch from untrusted remotes is safe by default.** Tree entries that would write outside the work tree, reference names that would escape `.git/`, and configuration values that would inject new sections into `.git/config` are rejected at write time rather than after damage is done.
+- **Packs are size-bounded.** Each entry is inflated against its declared size; a forged size or a decompression bomb throws rather than allocating without bound. Forged object counts no longer drive multi-gigabyte `reserveCapacity` allocations.
+- **OIDs are content-addressed on read.** Every object returned by `GKLooseObjectDatabase` is verified to re-hash to the requested OID. Tampered storage that swaps content under an existing OID is detected.
+- **SHA-1 caveat.** Object IDs are SHA-1 digests, which are no longer collision-resistant. The integrity check above defends against tampered storage but cannot defend against a true SHA-1 collision; pair OIDs with out-of-band integrity (e.g. signed commits/tags) when authenticity matters. SHA-256 object-format support is planned.
