@@ -69,7 +69,7 @@ disabled_rules:
   - inclusive_language
 #  - invalid_swiftlint_command
 #  - is_disjoint
-#  - large_tuple
+  - large_tuple
 #  - leading_whitespace #Correctable
 #  - legacy_cggeometry_functions #Correctable
 #  - legacy_constant #Correctable

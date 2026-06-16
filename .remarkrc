@@ -1,0 +1,6 @@
+{
+  "plugins": [
+    ["remark-lint-no-shortcut-reference-link", false],
+    ["remark-lint-no-undefined-references", false]
+  ]
+}
