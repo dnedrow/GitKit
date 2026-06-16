@@ -34,6 +34,7 @@ public enum GKError: Error, CustomStringConvertible {
     case invalidDiff(String)
     case unsafePath(String)
     case invalidReferenceName(String)
+    case objectHashMismatch(expected: GKObjectID, actual: GKObjectID)
 
     public var description: String {
         switch self {
@@ -97,6 +98,8 @@ public enum GKError: Error, CustomStringConvertible {
             return "Unsafe path rejected: \(msg)"
         case .invalidReferenceName(let msg):
             return "Invalid reference name: \(msg)"
+        case .objectHashMismatch(let expected, let actual):
+            return "Object hash mismatch: expected \(expected.hex), got \(actual.hex)"
         }
     }
 }

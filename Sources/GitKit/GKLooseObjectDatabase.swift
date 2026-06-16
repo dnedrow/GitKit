@@ -31,18 +31,36 @@ final class GKLooseObjectDatabase: GKObjectDatabase {
             return cached
         }
         if let loose = try readLoose(oid: oid) {
+            try verifyIntegrity(loose, expected: oid)
             cache[oid] = loose
             return loose
         }
         if let packed = try readFromIndexedPacks(oid: oid) {
+            try verifyIntegrity(packed, expected: oid)
             cache[oid] = packed
             return packed
         }
         if let fallback = indexlessObject(for: oid) {
+            try verifyIntegrity(fallback, expected: oid)
             cache[oid] = fallback
             return fallback
         }
         throw GKError.objectNotFound(oid)
+    }
+
+    /// Verifies that a materialized object's content hashes to the OID it was
+    /// requested under.
+    ///
+    /// Loose files are addressed by directory/name and packed objects are located
+    /// via a `.pack`/`.idx` whose OID→offset mapping is otherwise trusted; a
+    /// corrupted or tampered store (or a malicious pack index) could therefore
+    /// serve content for the wrong OID. Because `GKRawObject` recomputes its OID
+    /// from the content it holds, comparing it against the requested OID restores
+    /// Git's content-addressing guarantee before the object is cached or returned.
+    private func verifyIntegrity(_ object: GKRawObject, expected oid: GKObjectID) throws {
+        guard object.oid == oid else {
+            throw GKError.objectHashMismatch(expected: oid, actual: object.oid)
+        }
     }
 
     func exists(oid: GKObjectID) -> Bool {

@@ -1183,6 +1183,84 @@ struct GKPackRandomAccessTests {
     }
 }
 
+// MARK: - Object Integrity Verification Tests
+
+@Suite("GKObjectIntegrity")
+struct GKObjectIntegrityTests {
+    private func makeObjectsDir() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gkintegrity-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: dir.appendingPathComponent("pack"), withIntermediateDirectories: true)
+        return dir
+    }
+
+    private func loosePath(for oid: GKObjectID, in objectsDir: URL) -> URL {
+        let hex = oid.hex
+        return objectsDir
+            .appendingPathComponent(String(hex.prefix(2)))
+            .appendingPathComponent(String(hex.dropFirst(2)))
+    }
+
+    /// A loose object whose stored content does not hash to the OID it is filed
+    /// under must be rejected on read rather than silently returned.
+    @Test func tamperedLooseObjectIsRejected() throws {
+        let objectsDir = try makeObjectsDir()
+        defer { try? FileManager.default.removeItem(at: objectsDir) }
+
+        let real = GKRawObject(type: .blob, data: Data("authentic content".utf8))
+        let forged = GKRawObject(type: .blob, data: Data("tampered content".utf8))
+
+        // Place the forged object's bytes at the *real* object's loose path, so
+        // the filename claims one OID while the content hashes to another.
+        let path = loosePath(for: real.oid, in: objectsDir)
+        try FileManager.default.createDirectory(
+            at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try GKZlib.compress(forged.serialized).write(to: path)
+
+        let db = GKLooseObjectDatabase(objectsURL: objectsDir)
+        #expect(throws: GKError.self) {
+            _ = try db.read(oid: real.oid)
+        }
+    }
+
+    /// A faithfully stored object still reads back successfully.
+    @Test func untamperedObjectReadsSuccessfully() throws {
+        let objectsDir = try makeObjectsDir()
+        defer { try? FileManager.default.removeItem(at: objectsDir) }
+
+        let db = GKLooseObjectDatabase(objectsURL: objectsDir)
+        let blob = GKRawObject(type: .blob, data: Data("genuine".utf8))
+        try db.write(blob)
+
+        let read = try db.read(oid: blob.oid)
+        #expect(read.oid == blob.oid)
+        #expect(read.data == blob.data)
+    }
+
+    /// The error reports the expected and actual OIDs for diagnosis.
+    @Test func mismatchErrorCarriesBothOIDs() throws {
+        let objectsDir = try makeObjectsDir()
+        defer { try? FileManager.default.removeItem(at: objectsDir) }
+
+        let real = GKRawObject(type: .blob, data: Data("aaaa".utf8))
+        let forged = GKRawObject(type: .blob, data: Data("bbbb".utf8))
+        let path = loosePath(for: real.oid, in: objectsDir)
+        try FileManager.default.createDirectory(
+            at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try GKZlib.compress(forged.serialized).write(to: path)
+
+        let db = GKLooseObjectDatabase(objectsURL: objectsDir)
+        do {
+            _ = try db.read(oid: real.oid)
+            Issue.record("Expected a hash-mismatch error")
+        } catch let GKError.objectHashMismatch(expected, actual) {
+            #expect(expected == real.oid)
+            #expect(actual == forged.oid)
+        }
+    }
+}
+
 // MARK: - Object Database Pack Tests
 
 @Suite("GKLooseObjectDatabase packs")
