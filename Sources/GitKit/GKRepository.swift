@@ -237,54 +237,86 @@ public final class GKRepository: GKRepositoryProtocol {
         // 2. Repository-level .git/info/exclude — scoped to repo root.
         sources.append((baseDir: "", url: gitDir.appendingPathComponent("info/exclude")))
 
-        // 3. Per-directory .gitignore files (root first, then nested shallow to deep),
-        //    each scoped to its own directory.
-        sources.append(contentsOf: gitignoreFiles())
+        // 3. Root .gitignore — scoped to repo root, first of the per-directory files.
+        if !isBare {
+            let root = workDir.appendingPathComponent(".gitignore")
+            if FileManager.default.fileExists(atPath: root.path) {
+                sources.append((baseDir: "", url: root))
+            }
+        }
+
+        // A preliminary matcher built from the root-scoped sources is enough to prune
+        // ignored subtrees while discovering nested `.gitignore` files: a `.gitignore`
+        // living inside an already-ignored directory cannot affect tracked/untracked
+        // results, so it is skipped (Git-correct).
+        let pruneMatcher = GKIgnore(sources: sources)
+
+        // 4. Nested per-directory .gitignore files (shallow to deep), each scoped to
+        //    its own directory, discovered with ignored-directory pruning applied.
+        sources.append(contentsOf: nestedGitignoreFiles(pruneMatcher: pruneMatcher))
 
         return GKIgnore(sources: sources)
     }
 
-    /// Discovers `.gitignore` files under the working directory, ordered shallow to
-    /// deep, each paired with the repo-root-relative directory it applies under.
-    private func gitignoreFiles() -> [(baseDir: String, url: URL)] {
+    /// Discovers nested `.gitignore` files under the working directory (excluding the
+    /// root `.gitignore`), ordered shallow to deep, each paired with the repo-root-
+    /// relative directory it applies under. Ignored directory subtrees are pruned via
+    /// `skipDescendants()` so discovery never descends into an ignored tree.
+    private func nestedGitignoreFiles(pruneMatcher: GKIgnore) -> [(baseDir: String, url: URL)] {
         guard !isBare else { return [] }
         let fm = FileManager.default
-        var results = [(baseDir: String, url: URL)]()
-
-        // Root .gitignore first (base directory is the repo root, "").
         let root = workDir.appendingPathComponent(".gitignore")
-        if fm.fileExists(atPath: root.path) {
-            results.append((baseDir: "", url: root))
+        let resolvedBase = workDir.resolvingSymlinksInPath().path
+
+        guard let enumerator = fm.enumerator(at: workDir,
+                                             includingPropertiesForKeys: [.isDirectoryKey]) else {
+            return []
         }
 
-        // Nested .gitignore files, excluding the .git directory.
-        if let enumerator = fm.enumerator(at: workDir, includingPropertiesForKeys: nil) {
-            var nested = [(depth: Int, baseDir: String, url: URL)]()
-            while let fileURL = enumerator.nextObject() as? URL {
-                let relativePath = workTreeRelativePath(fileURL) ?? fileURL.lastPathComponent
-                if relativePath.hasPrefix(".git/") || relativePath == ".git" { continue }
-                guard fileURL.lastPathComponent == ".gitignore" else { continue }
-                if fileURL.path == root.path { continue }
-                // The base directory is the .gitignore's parent, relative to the root.
-                let baseDir = relativePath.hasSuffix("/.gitignore")
-                    ? String(relativePath.dropLast("/.gitignore".count))
-                    : ""
-                let depth = relativePath.split(separator: "/").count
-                nested.append((depth, baseDir, fileURL))
+        var nested = [(depth: Int, baseDir: String, url: URL)]()
+        while let fileURL = enumerator.nextObject() as? URL {
+            let relativePath = workTreeRelativePath(fileURL, resolvedBase: resolvedBase)
+                ?? fileURL.lastPathComponent
+            // Never descend into the .git directory.
+            if relativePath == ".git" || relativePath.hasPrefix(".git/") {
+                enumerator.skipDescendants()
+                continue
             }
-            // Shallow to deep so deeper files take precedence (last-match-wins).
-            nested.sort { $0.depth < $1.depth }
-            results.append(contentsOf: nested.map { (baseDir: $0.baseDir, url: $0.url) })
-        }
 
-        return results
+            let isDir = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            if isDir {
+                // Prune ignored subtrees — a nested .gitignore inside them is irrelevant.
+                if pruneMatcher.isDirectoryIgnored(path: relativePath) {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+
+            guard fileURL.lastPathComponent == ".gitignore" else { continue }
+            if fileURL.path == root.path { continue }
+            // The base directory is the .gitignore's parent, relative to the root.
+            let baseDir = relativePath.hasSuffix("/.gitignore")
+                ? String(relativePath.dropLast("/.gitignore".count))
+                : ""
+            let depth = relativePath.split(separator: "/").count
+            nested.append((depth, baseDir, fileURL))
+        }
+        // Shallow to deep so deeper files take precedence (last-match-wins).
+        nested.sort { $0.depth < $1.depth }
+        return nested.map { (baseDir: $0.baseDir, url: $0.url) }
     }
 
     /// Computes a path relative to the working directory, resolving symlinks so that
     /// enumerated file URLs (which may carry a `/private` prefix on macOS) match the
     /// working-directory root. Returns `nil` if the URL is not under the working tree.
     func workTreeRelativePath(_ url: URL) -> String? {
-        let base = workDir.resolvingSymlinksInPath().path
+        workTreeRelativePath(url, resolvedBase: workDir.resolvingSymlinksInPath().path)
+    }
+
+    /// Variant of `workTreeRelativePath(_:)` that accepts the already-resolved working
+    /// directory root, so a walk resolves the base symlink once instead of per file.
+    /// Preserves the macOS `/private` prefix handling by resolving `url` the same way.
+    func workTreeRelativePath(_ url: URL, resolvedBase base: String) -> String? {
         let full = url.resolvingSymlinksInPath().path
         if full == base { return "" }
         let basePrefix = base.hasSuffix("/") ? base : base + "/"
@@ -324,6 +356,9 @@ public final class GKRepository: GKRepositoryProtocol {
         if !isBare {
             let fm = FileManager.default
             let ignore = ignoreMatcher()
+            // Resolve the working-directory root symlink once for the whole walk
+            // instead of once per file.
+            let resolvedBase = workDir.resolvingSymlinksInPath().path
 
             // Index entries keyed by path for O(1) lookup, plus the index file's
             // own mtime for racy-clean detection.
@@ -331,19 +366,47 @@ public final class GKRepository: GKRepositoryProtocol {
             for entry in index.entries { entryByPath[entry.path] = entry }
             let indexMtimeSeconds = GKFileStat.read(at: gitDir.appendingPathComponent("index"))?.mtimeSeconds ?? 0
 
-            if let enumerator = fm.enumerator(at: workDir, includingPropertiesForKeys: [.isRegularFileKey],
+            // Every ancestor directory that contains a tracked (index) file. An ignored
+            // directory is only safe to prune when it holds no tracked files, otherwise
+            // pruning would hide a tracked file's working-tree modification.
+            var trackedDirs = Set<String>()
+            for entry in index.entries {
+                var components = entry.path.split(separator: "/").map(String.init)
+                guard components.count > 1 else { continue }
+                components.removeLast()
+                var prefix = ""
+                for component in components {
+                    prefix = prefix.isEmpty ? component : prefix + "/" + component
+                    trackedDirs.insert(prefix)
+                }
+            }
+
+            if let enumerator = fm.enumerator(at: workDir,
+                                              includingPropertiesForKeys: [.isDirectoryKey],
                                               options: []) {
                 while let fileURL = enumerator.nextObject() as? URL {
-                    let relativePath = workTreeRelativePath(fileURL) ?? fileURL.lastPathComponent
+                    let relativePath = workTreeRelativePath(fileURL, resolvedBase: resolvedBase)
+                        ?? fileURL.lastPathComponent
                     // Never descend into or report the .git directory.
                     if relativePath == ".git" || relativePath.hasPrefix(".git/") {
                         enumerator.skipDescendants()
                         continue
                     }
 
-                    var isDir: ObjCBool = false
-                    fm.fileExists(atPath: fileURL.path, isDirectory: &isDir)
-                    if isDir.boolValue { continue }
+                    // Use the enumerator's prefetched resource value for the file type
+                    // instead of a separate fileExists(isDirectory:) probe.
+                    let isDir = (try? fileURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                    if isDir {
+                        // Prune an ignored directory's entire subtree, mirroring the
+                        // .git pruning above — files beneath it are already excluded.
+                        // Skip pruning when the directory holds tracked files so their
+                        // modifications are still reported (tracked files aren't ignored).
+                        if ignore.isDirectoryIgnored(path: relativePath),
+                           !trackedDirs.contains(relativePath) {
+                            enumerator.skipDescendants()
+                        }
+                        continue
+                    }
 
                     guard let indexEntry = entryByPath[relativePath] else {
                         // Exclude ignored, untracked files from the untracked set.

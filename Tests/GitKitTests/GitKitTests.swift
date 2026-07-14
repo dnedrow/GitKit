@@ -448,6 +448,142 @@ struct GKGitignoreExclusionTests {
 }
 
 
+// MARK: - Status Directory Pruning Tests
+
+@Suite("GKStatusDirectoryPruning")
+struct GKStatusDirectoryPruningTests {
+    /// Creates a fresh repository in a unique temporary directory.
+    private func makeRepo() throws -> (GKRepository, URL) {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gitkit-prune-test-\(UUID().uuidString)")
+        let repo = try GKRepository.GKInitRepository(at: tempDir)
+        return (repo, tempDir)
+    }
+
+    private func write(_ contents: String, to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    // 4.4 Directory-level ignore matching.
+    @Test func directoryLevelIgnoreMatching() {
+        // An ignored directory is reported as ignored.
+        let ignore = GKIgnore(patterns: GKIgnore.parse("/build\nnode_modules"))
+        #expect(ignore.isDirectoryIgnored(path: "build"))
+        #expect(ignore.isDirectoryIgnored(path: "packages/a/node_modules"))
+        // A non-ignored directory is not pruned.
+        #expect(!ignore.isDirectoryIgnored(path: "src"))
+
+        // No re-inclusion under an ignored directory: `build` stays ignored even with
+        // a nested negation, so `build/keep.txt` cannot be re-included via the tree walk.
+        let neg = GKIgnore(patterns: GKIgnore.parse("build/\n!build/keep.txt"))
+        #expect(neg.isDirectoryIgnored(path: "build"))
+
+        // A directory-only pattern matches a directory leaf but not a file leaf.
+        let dirOnly = GKIgnore(patterns: GKIgnore.parse("logs/"))
+        #expect(dirOnly.isIgnored(path: "logs", isDirectory: true))
+        #expect(!dirOnly.isIgnored(path: "logs", isDirectory: false))
+    }
+
+    // 4.1 Files under an ignored directory are excluded and the subtree is pruned.
+    @Test func filesUnderIgnoredDirectoryAreExcluded() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try write("/build\n", to: dir.appendingPathComponent(".gitignore"))
+        // A deep, multi-file ignored subtree that must not be enumerated file-by-file.
+        for index in 0..<50 {
+            try write("x", to: dir.appendingPathComponent("build/a/b/c/file\(index).o"))
+        }
+        try write("y", to: dir.appendingPathComponent("keep.txt"))
+
+        let status = try repo.status()
+        #expect(status.untracked.contains("keep.txt"))
+        #expect(!status.untracked.contains { $0.hasPrefix("build/") })
+    }
+
+    // 4.2 A tracked, modified file inside an otherwise-ignored directory is reported.
+    @Test func trackedModifiedFileInsideIgnoredDirectoryIsReported() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Track and commit a file inside build/ before any ignore rule exists.
+        let tracked = dir.appendingPathComponent("build/app.txt")
+        try write("v1", to: tracked)
+        try repo.GKAdd(path: "build/app.txt")
+        let author = GKSignature(name: "Test", email: "test@test.com")
+        try repo.GKCreateCommit(message: "Initial", author: author)
+
+        // Now ignore the whole build/ directory, modify the tracked file, and add an
+        // untracked sibling inside the ignored directory.
+        try write("/build\n", to: dir.appendingPathComponent(".gitignore"))
+        try write("v2", to: tracked)
+        try write("junk", to: dir.appendingPathComponent("build/junk.txt"))
+
+        let status = try repo.status()
+        // The tracked modification is still detected despite the directory being ignored.
+        #expect(status.unstaged.contains { $0.path == "build/app.txt" })
+        // The untracked sibling inside the ignored directory is excluded.
+        #expect(!status.untracked.contains("build/junk.txt"))
+    }
+
+    // 4.3 A non-ignored sibling directory is still traversed.
+    @Test func nonIgnoredSiblingDirectoryIsTraversed() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try write("/build\n", to: dir.appendingPathComponent(".gitignore"))
+        try write("x", to: dir.appendingPathComponent("build/bundle.o"))
+        try write("y", to: dir.appendingPathComponent("src/main.swift"))
+
+        let status = try repo.status()
+        #expect(status.untracked.contains("src/main.swift"))
+        #expect(!status.untracked.contains { $0.hasPrefix("build/") })
+    }
+
+    // 4.5 Result parity across staged, unstaged, untracked, and ignored files.
+    @Test func statusSetParityAcrossFileStates() throws {
+        let (repo, dir) = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let author = GKSignature(name: "Test", email: "test@test.com")
+
+        // Committed file that we will modify → unstaged modified.
+        let committed = dir.appendingPathComponent("a.txt")
+        try write("v1", to: committed)
+        try repo.GKAdd(path: "a.txt")
+        try repo.GKCreateCommit(message: "Initial", author: author)
+        try write("v2", to: committed)
+
+        // Newly staged file (in index, not in HEAD) → staged added.
+        try write("b", to: dir.appendingPathComponent("b.txt"))
+        try repo.GKAdd(path: "b.txt")
+
+        // Untracked file → untracked.
+        try write("u", to: dir.appendingPathComponent("u.txt"))
+
+        // Ignored file and a large ignored directory → excluded/pruned.
+        try write("*.log\n/build\n", to: dir.appendingPathComponent(".gitignore"))
+        try write("noise", to: dir.appendingPathComponent("ignored.log"))
+        for index in 0..<25 {
+            try write("x", to: dir.appendingPathComponent("build/out\(index).o"))
+        }
+
+        let status = try repo.status()
+
+        #expect(status.staged.contains { $0.path == "b.txt" && $0.status == .added })
+        #expect(status.unstaged.contains { $0.path == "a.txt" && $0.status == .modified })
+        #expect(status.untracked.contains("u.txt"))
+        // Ignored content never appears.
+        #expect(!status.untracked.contains("ignored.log"))
+        #expect(!status.untracked.contains { $0.hasPrefix("build/") })
+        // Ignored files are not staged or unstaged either.
+        #expect(!status.unstaged.contains { $0.path.hasPrefix("build/") || $0.path == "ignored.log" })
+    }
+}
+
+
 // MARK: - Diff Tests
 
 @Suite("GKDiffEngine")

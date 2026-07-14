@@ -19,7 +19,16 @@ public struct GKIgnore: GKIgnoreProtocol {
     /// A pattern together with the repo-root-relative directory it applies under.
     struct ScopedPattern {
         let baseDir: String
+        /// Precomputed `baseDir + "/"` so scoping can skip non-matching paths cheaply
+        /// without rebuilding the prefix string on every evaluation.
+        let basePrefix: String
         let pattern: GKIgnorePattern
+
+        init(baseDir: String, pattern: GKIgnorePattern) {
+            self.baseDir = baseDir
+            self.basePrefix = baseDir.isEmpty ? "" : baseDir + "/"
+            self.pattern = pattern
+        }
     }
 
     let entries: [ScopedPattern]
@@ -64,24 +73,49 @@ public struct GKIgnore: GKIgnoreProtocol {
     }
 
     public func isIgnored(path: String) -> Bool {
+        isIgnored(path: path, isDirectory: false)
+    }
+
+    /// Checks whether a path is ignored, taking into account whether the path refers
+    /// to a directory. Directory-only patterns (e.g. `build/`) match directories but
+    /// never files, so `isDirectory` selects the correct Git semantics for the leaf.
+    ///
+    /// This is the entry point a working-tree walk uses to decide it may prune an
+    /// ignored directory's entire subtree. Consistent with Git, once a directory is
+    /// ignored the walk stops descending, so a nested negation such as
+    /// `!build/keep.txt` cannot re-include anything beneath an ignored `build/`.
+    public func isIgnored(path: String, isDirectory: Bool) -> Bool {
         var ignored = false
         for entry in entries {
-            guard let relative = GKIgnore.relativePath(of: path, under: entry.baseDir) else { continue }
-            if entry.pattern.matches(path: relative) {
+            guard let relative = GKIgnore.relativePath(of: path,
+                                                       basePrefix: entry.basePrefix,
+                                                       baseDir: entry.baseDir) else { continue }
+            if entry.pattern.matches(path: relative, isDirectory: isDirectory) {
                 ignored = !entry.pattern.isNegation
             }
         }
         return ignored
     }
 
+    /// Convenience wrapper that reports whether a *directory* path is ignored, so a
+    /// working-tree walk can prune the directory's subtree without inspecting children.
+    public func isDirectoryIgnored(path: String) -> Bool {
+        isIgnored(path: path, isDirectory: true)
+    }
+
     /// Returns `path` relative to `baseDir`, or `nil` if `path` is not beneath it.
     /// An empty `baseDir` means the repository root and returns the path unchanged.
     static func relativePath(of path: String, under baseDir: String) -> String? {
+        relativePath(of: path, basePrefix: baseDir.isEmpty ? "" : baseDir + "/", baseDir: baseDir)
+    }
+
+    /// Scoping check using a precomputed `basePrefix` (`baseDir + "/"`) to avoid
+    /// rebuilding the prefix string for every pattern on every evaluation.
+    static func relativePath(of path: String, basePrefix: String, baseDir: String) -> String? {
         if baseDir.isEmpty { return path }
         if path == baseDir { return nil } // the directory itself, not a child
-        let prefix = baseDir + "/"
-        guard path.hasPrefix(prefix) else { return nil }
-        return String(path.dropFirst(prefix.count))
+        guard path.hasPrefix(basePrefix) else { return nil }
+        return String(path.dropFirst(basePrefix.count))
     }
 }
 
@@ -95,6 +129,12 @@ public struct GKIgnorePattern: Sendable {
     public let isAnchored: Bool
     /// The pattern split into `/`-separated segments (may contain `**`).
     let segments: [String]
+    /// Each segment pre-split into a `[Character]` array so recursive matching never
+    /// rebuilds character arrays or `Array` slices on a hot path.
+    let segmentChars: [[Character]]
+
+    /// The `**` segment, precomputed once for cheap identity comparison.
+    private static let doubleStar: [Character] = ["*", "*"]
 
     public init(pattern: String) {
         var p = pattern
@@ -109,57 +149,67 @@ public struct GKIgnorePattern: Sendable {
         if p.hasPrefix("/") { p = String(p.dropFirst()) }
 
         self.rawPattern = pattern
-        self.segments = p.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        let segs = p.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        self.segments = segs
+        self.segmentChars = segs.map(Array.init)
     }
 
     /// Checks if this pattern matches the given path (already made relative to the
     /// pattern's base directory).
     public func matches(path: String) -> Bool {
-        let pathSegments = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-        guard !segments.isEmpty, !pathSegments.isEmpty else { return false }
+        matches(path: path, isDirectory: false)
+    }
+
+    /// Checks if this pattern matches the given path, honoring whether the leaf is a
+    /// directory. A directory-only pattern (`foo/`) matches a directory leaf but not
+    /// a file leaf; paths *beneath* a matched directory always match either way.
+    public func matches(path: String, isDirectory: Bool) -> Bool {
+        let pathSegments = path.split(separator: "/", omittingEmptySubsequences: true).map(Array.init)
+        guard !segmentChars.isEmpty, !pathSegments.isEmpty else { return false }
 
         if isAnchored {
-            return matchesPrefix(pathSegments, startingAt: 0)
+            return matchesPrefix(pathSegments, startingAt: 0, isDirectory: isDirectory)
         }
         // Floating: the pattern may match starting at any path segment.
         for start in 0..<pathSegments.count {
-            if matchesPrefix(pathSegments, startingAt: start) { return true }
+            if matchesPrefix(pathSegments, startingAt: start, isDirectory: isDirectory) { return true }
         }
         return false
     }
 
     /// Whether `segments` matches a prefix of `pathSegments[start...]`. If the match
     /// stops before the end of the path, the path is inside a matched directory and
-    /// is ignored. If it matches exactly to the leaf, a directory-only pattern does
-    /// not match a (leaf) file.
-    private func matchesPrefix(_ pathSegments: [String], startingAt start: Int) -> Bool {
+    /// is ignored. If it matches exactly to the leaf, a directory-only pattern matches
+    /// only when the leaf is itself a directory.
+    private func matchesPrefix(_ pathSegments: [[Character]], startingAt start: Int, isDirectory: Bool) -> Bool {
         for end in start...pathSegments.count {
-            let slice = Array(pathSegments[start..<end])
-            if Self.matchSegments(segments, slice) {
+            if Self.matchSegments(segmentChars, 0, pathSegments, start, end) {
                 if end < pathSegments.count {
                     return true // path is beneath a matched directory
                 }
-                return !isDirectoryOnly // exact leaf match
+                // Exact leaf match: a directory-only pattern needs a directory leaf.
+                return !isDirectoryOnly || isDirectory
             }
         }
         return false
     }
 
-    /// Whether `pat` matches the entire `path` segment slice, with `**` spanning
-    /// zero or more segments.
-    static func matchSegments(_ pat: [String], _ path: [String]) -> Bool {
-        if pat.isEmpty { return path.isEmpty }
-        let head = pat[0]
-        if head == "**" {
+    /// Whether the pattern segments `pat[pi...]` match the path segments
+    /// `path[xi..<end]`, with `**` spanning zero or more segments. Indices are used
+    /// instead of slicing so no intermediate arrays are allocated during recursion.
+    static func matchSegments(_ pat: [[Character]], _ pi: Int, _ path: [[Character]], _ xi: Int, _ end: Int) -> Bool {
+        if pi == pat.count { return xi == end }
+        let head = pat[pi]
+        if head == doubleStar {
             // Match zero or more leading path segments.
-            for split in 0...path.count {
-                if matchSegments(Array(pat.dropFirst()), Array(path[split...])) { return true }
+            for split in xi...end {
+                if matchSegments(pat, pi + 1, path, split, end) { return true }
             }
             return false
         }
-        guard let first = path.first else { return false }
-        guard segmentMatch(Array(head), 0, Array(first), 0) else { return false }
-        return matchSegments(Array(pat.dropFirst()), Array(path.dropFirst()))
+        guard xi < end else { return false }
+        guard segmentMatch(head, 0, path[xi], 0) else { return false }
+        return matchSegments(pat, pi + 1, path, xi + 1, end)
     }
 
     /// Glob-matches a single path segment against a single pattern segment,
